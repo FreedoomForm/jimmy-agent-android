@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.3.2";
+    private static final String VERSION = "0.4";
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -97,6 +97,7 @@ public class MainActivity extends Activity {
     private final ArrayList<Msg> msgs = new ArrayList<>();
     private ChatAdapter adapter;
     private boolean showingFiles = false;
+    private boolean editingPrompt = false;
 
     // ---------- файлы ----------
     private File filesCurDir;
@@ -144,7 +145,7 @@ public class MainActivity extends Activity {
             stopAgent();
             return;
         }
-        if (showingFiles) {
+        if (editingPrompt || showingFiles) {
             backToChat();
             return;
         }
@@ -241,6 +242,7 @@ public class MainActivity extends Activity {
             jimmyDir.mkdirs();
             new File(home, ".codex").mkdirs();
             copyAsset("jimmy/AGENTS.md", new File(jimmyDir, "AGENTS.md"));
+            copyAsset("jimmy/AGENTS.md", new File(jimmyDir, ".AGENTS.md.default"));
             copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
             logconsole("AGENTS.md + config.toml ✔");
             refreshAssetsIfNeeded(); // отметить версию ассетов
@@ -263,7 +265,7 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 startProxy();
                 showChat();
-                addNote("🦴 окружение готово. grug доволен. complexity very, very bad.");
+                addNote("✔ окружение готово — можно писать.");
             });
         } catch (final Throwable t) {
             status("ОШИБКА УСТАНОВКИ");
@@ -281,7 +283,9 @@ public class MainActivity extends Activity {
     }
 
     // при обновлении APK поверх старого: подтягиваем свежие AGENTS.md/config.toml
-    // (полный setup не запускается, а они могли измениться в новой версии)
+    // (полный setup не запускается, а они могли измениться в новой версии).
+    // Системный промпт НЕ затираем, если пользователь его редактировал:
+    // сравниваем с ранее записанной «теневой» копией дефолта.
     private void refreshAssetsIfNeeded() {
         try {
             File marker = new File(filesDir, ".assets_v");
@@ -295,7 +299,18 @@ public class MainActivity extends Activity {
             if (!VERSION.equals(cur)) {
                 jimmyDir.mkdirs();
                 new File(home, ".codex").mkdirs();
-                copyAsset("jimmy/AGENTS.md", new File(jimmyDir, "AGENTS.md"));
+                File agents = new File(jimmyDir, "AGENTS.md");
+                File shadow = new File(jimmyDir, ".AGENTS.md.default");
+                boolean userCustom = false;
+                if (agents.exists() && shadow.exists()) {
+                    String a = readFileText(agents);
+                    String p = readFileText(shadow);
+                    userCustom = !a.equals(p);
+                }
+                if (!userCustom) {
+                    copyAsset("jimmy/AGENTS.md", agents);
+                    copyAsset("jimmy/AGENTS.md", shadow);
+                } // пользовательский промпт — святыня, не трогаем
                 copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
                 FileOutputStream fos = new FileOutputStream(marker);
                 fos.write((VERSION + "\n").getBytes("UTF-8"));
@@ -542,10 +557,13 @@ public class MainActivity extends Activity {
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = tv("⚡ JimmyAgent", 17, TXT, true);
         titles.addView(title);
-        TextView sub = tv("codex · chatjimmy · llama3.1-8B 🦴", 11, DIM2, false);
+        TextView sub = tv("codex · chatjimmy · llama3.1-8B", 11, DIM2, false);
         titles.addView(sub);
         head.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        TextView promptBtn = hdrBtn("⚙");
+        promptBtn.setOnClickListener(v -> showPromptEditor());
+        head.addView(promptBtn);
         TextView filesBtn = hdrBtn("📁");
         filesBtn.setOnClickListener(v -> showFiles());
         head.addView(filesBtn);
@@ -626,7 +644,7 @@ public class MainActivity extends Activity {
         sendBtn.setText("■");
         sendBtn.setTextSize(14);
         sendBtn.setEnabled(true);
-        if (input != null) input.setHint("grug печатает…");
+        if (input != null) input.setHint("печатает ответ…");
     }
 
     private TextView hdrBtn(String s) {
@@ -647,7 +665,7 @@ public class MainActivity extends Activity {
         hasSession = false;
         stopRequested = false;
         adapter.notifyDataSetChanged();
-        addNote("✎ новый диалог — grug готов. файлы в песочнице остались на месте.");
+        addNote("✎ новый диалог. файлы в песочнице остались на месте.");
     }
 
     private void onSend() {
@@ -705,12 +723,11 @@ public class MainActivity extends Activity {
                 live.text = "";
                 adapter.notifyDataSetChanged();
             });
-            appendLive(live, acc, T_OPEN + "🦴 grug думает…\n" + T_CLOSE);
+            appendLive(live, acc, T_OPEN + "💭 думаю…\n" + T_CLOSE);
 
             String prompt = userMsg;
             if (attempt > 1 && hasSession) {
-                prompt = "grug, ты не ответил. Ответь кратко на ПРЕДЫДУЩИЙ запрос "
-                        + "пользователя. Обязательно начни с <think> и ответь по-русски.";
+                prompt = "Ответь кратко на предыдущий запрос пользователя, по-русски.";
             }
             StringBuilder agentText = new StringBuilder();
             boolean[] gotThread = new boolean[1];
@@ -734,7 +751,7 @@ public class MainActivity extends Activity {
         } else if (!answered) {
             final String msg = err != null
                     ? "💥 ошибка: " + err
-                    : "(grug так и не ответил за " + MAX_ATTEMPTS
+                    : "(модель не ответила за " + MAX_ATTEMPTS
                     + " попытки — переформулируй или жми ↻ ещё раз)";
             ui.post(() -> {
                 live.text = msg;
@@ -802,7 +819,7 @@ public class MainActivity extends Activity {
                     String it = item.optString("type", "");
                     if ("reasoning".equals(it)) {
                         String t = item.optString("text", "").trim();
-                        if (!t.isEmpty()) appendLive(live, acc, T_OPEN + "🦴 " + oneLine(t, 320) + "\n" + T_CLOSE);
+                        if (!t.isEmpty()) appendLive(live, acc, T_OPEN + "💭 " + oneLine(t, 320) + "\n" + T_CLOSE);
                     } else if ("command_execution".equals(it)) {
                         String c = item.optString("command", "").trim();
                         StringBuilder codeBlock = new StringBuilder();
@@ -841,7 +858,7 @@ public class MainActivity extends Activity {
             appendPlain(t.substring(last, m.start()), live, acc);
             String think = m.group(1) == null ? "" : m.group(1).trim();
             if (!think.isEmpty())
-                appendLive(live, acc, T_OPEN + "🦴 " + think + "\n" + T_CLOSE);
+                appendLive(live, acc, T_OPEN + "💭 " + think + "\n" + T_CLOSE);
             last = m.end();
         }
         appendPlain(t.substring(last), live, acc);
@@ -1116,6 +1133,7 @@ public class MainActivity extends Activity {
 
     private void backToChat() {
         showingFiles = false;
+        editingPrompt = false;
         setContentView(chatRoot);
     }
 
@@ -1216,6 +1234,97 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             return "(не удалось прочитать: " + t + ")";
         }
+    }
+
+    // =====================================================================
+    // РЕДАКТОР СИСТЕМНОГО ПРОМПТА (~/jimmy/AGENTS.md)
+    // =====================================================================
+    private void showPromptEditor() {
+        jimmyDir.mkdirs();
+        final File agentsFile = new File(jimmyDir, "AGENTS.md");
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        // шапка
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(6), dp(10), dp(6), dp(10));
+        head.setBackgroundColor(HEAD);
+        TextView back = hdrBtn("←");
+        back.setOnClickListener(v -> backToChat());
+        head.addView(back);
+        TextView title = tv("⚙ системный промпт", 15, TXT, true);
+        title.setPadding(dp(8), 0, 0, 0);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView reset = hdrBtn("↺");
+        TextView save = hdrBtn("💾");
+        head.addView(reset);
+        head.addView(save);
+        root.addView(head);
+
+        View div = new View(this);
+        div.setBackgroundColor(LINE);
+        root.addView(div, new LinearLayout.LayoutParams(-1, 1));
+
+        TextView hint = tv("хранится в ~/jimmy/AGENTS.md — Codex читает его перед КАЖДЫМ "
+                + "запросом: изменения применяются со следующего сообщения. "
+                + "↺ — вернуть стандартный текст (ещё не сохраняет).", 11.5f, DIM2, false);
+        hint.setPadding(dp(14), dp(8), dp(14), dp(8));
+        root.addView(hint);
+
+        final EditText editor = new EditText(this);
+        editor.setTextColor(TXT);
+        editor.setTextSize(12.5f);
+        editor.setTypeface(Typeface.MONOSPACE);
+        editor.setBackgroundColor(BG);
+        editor.setPadding(dp(14), dp(8), dp(14), dp(24));
+        editor.setGravity(Gravity.TOP | Gravity.START);
+        editor.setMinLines(10);
+        editor.setHorizontallyScrolling(false);
+        String cur2 = agentsFile.exists() ? readFileText(agentsFile) : readAssetText("jimmy/AGENTS.md");
+        editor.setText(cur2);
+        root.addView(editor, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        reset.setOnClickListener(v -> {
+            editor.setText(readAssetText("jimmy/AGENTS.md"));
+            editor.setSelection(0);
+            Toast.makeText(this, "загружен стандартный — нажми 💾 чтобы сохранить", Toast.LENGTH_SHORT).show();
+        });
+        save.setOnClickListener(v -> {
+            try {
+                writeTextFile(agentsFile, editor.getText().toString());
+                Toast.makeText(this, "промпт сохранён — действует со следующего сообщения", Toast.LENGTH_SHORT).show();
+                backToChat();
+            } catch (Throwable t) {
+                Toast.makeText(this, "ошибка сохранения: " + t, Toast.LENGTH_LONG).show();
+            }
+        });
+
+        editingPrompt = true;
+        setContentView(root);
+    }
+
+    private String readAssetText(String asset) {
+        try {
+            InputStream in = getAssets().open(asset);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            in.close();
+            return bos.toString("UTF-8");
+        } catch (Throwable t) {
+            return "(не удалось прочитать asset " + asset + ": " + t + ")";
+        }
+    }
+
+    private void writeTextFile(File out, String text) throws Exception {
+        FileOutputStream fos = new FileOutputStream(out);
+        fos.write(text.getBytes("UTF-8"));
+        fos.close();
     }
 
     // =====================================================================
