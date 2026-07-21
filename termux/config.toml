@@ -3,6 +3,12 @@ model = "llama3.1-8B"
 model_provider = "chatjimmy"
 approval_policy = "never"
 
+# Реальный потолок контекста ChatJimmy неизвестен и модель «дурнеет» на
+# длинных промптах — держим диалог компактным. Codex будет автоматически
+# сжимать (compact) историю, когда она подходит к лимиту.
+model_context_window = 12288
+model_auto_compact_token_limit = 9000
+
 [model_providers.chatjimmy]
 name = "ChatJimmy via jimmy-proxy (Taalas ASIC, ~17K tok/s)"
 base_url = "http://127.0.0.1:4100/v1"

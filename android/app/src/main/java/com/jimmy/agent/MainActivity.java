@@ -3,18 +3,30 @@ package com.jimmy.agent;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.system.Os;
-import android.text.InputType;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.method.ScrollingMovementMethod;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.LineBackgroundSpan;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
+import android.text.style.TypefaceSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.BaseAdapter;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -31,12 +43,17 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -45,20 +62,27 @@ public class MainActivity extends Activity {
 
     // ---------- константы ----------
     private static final String TERMUX_USR = "/data/data/com.termux/files/usr";
-    private static final int BG = 0xFF212121, PANEL = 0xFF2F2F2F, LINE = 0x22FFFFFF,
-            TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
-            AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F;
-    private static final String VERSION = "0.3.0";
-    private static final int MAX_ATTEMPTS = 3;      // скрытые ретраи при пустом ответе
-    private static final long IDLE_TIMEOUT_MS = 120000; // сторожок "зависшего" ответа
+    private static final int BG = 0xFF171717, HEAD = 0xFF101010, PANEL = 0xFF101010,
+            LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
+            AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
+            CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
+    private static final String VERSION = "0.3.1";
+    private static final int MAX_ATTEMPTS = 3;
+    private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
+
+    // маркеры форматирования внутри потока ответа (не для пользователя)
+    private static final String T_OPEN = "⟦T⟧", T_CLOSE = "⟦/T⟧";
+    private static final String C_OPEN = "⟦C⟧", C_CLOSE = "⟦/C⟧";
+    private static final Pattern THINK_RX = Pattern.compile("(?is)<think>\\s*(.*?)(?:</think>|$)");
 
     private File filesDir, usr, home, jimmyDir, codexBin;
     private boolean hasSession = false;
     private boolean setupDone = false;
     private volatile boolean agentBusy = false;
-    private volatile Process currentProc = null;
     private volatile boolean stopRequested = false;
     private volatile long lastEventAt = 0;
+    private Process currentProc = null;
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     // ---------- загрузчик ----------
     private LinearLayout loadingRoot;
@@ -69,9 +93,15 @@ public class MainActivity extends Activity {
     private LinearLayout chatRoot;
     private ListView listView;
     private EditText input;
-    private TextView sendBtn;
+    private Button sendBtn;
     private final ArrayList<Msg> msgs = new ArrayList<>();
     private ChatAdapter adapter;
+    private boolean showingFiles = false;
+
+    // ---------- файлы ----------
+    private File filesCurDir;
+    private final ArrayList<File> fileRows = new ArrayList<>();
+    private FilesAdapter filesAdapter;
 
     static class Msg {
         String text;
@@ -97,6 +127,7 @@ public class MainActivity extends Activity {
         setupDone = new File(filesDir, ".setup_done").exists();
 
         adapter = new ChatAdapter();
+        filesAdapter = new FilesAdapter();
         if (setupDone) {
             startProxy();
             showChat();
@@ -108,11 +139,15 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (agentBusy) { // сначала останавливаем генерацию, а не выходим
-            onSend();
+        if (agentBusy) {          // сначала останавливаем генерацию, а не выходим
+            stopAgent();
             return;
         }
-        moveTaskToBack(true); // сворачиваемся, чтобы прокси дожил в фоне
+        if (showingFiles) {
+            backToChat();
+            return;
+        }
+        moveTaskToBack(true);     // сворачиваемся: прокси доживает в фоне
     }
 
     // =====================================================================
@@ -164,11 +199,12 @@ public class MainActivity extends Activity {
 
     private void status(final String s) {
         logconsole("▸ " + s);
-        runOnUiThread(() -> statusTxt.setText(s));
+        runOnUiThread(() -> { if (statusTxt != null) statusTxt.setText(s); });
     }
 
     private void logconsole(final String s) {
         runOnUiThread(() -> {
+            if (consoleTxt == null) return;
             consoleTxt.append(s + "\n");
             consoleScroll.post(() -> consoleScroll.fullScroll(View.FOCUS_DOWN));
         });
@@ -231,25 +267,13 @@ public class MainActivity extends Activity {
             status("ОШИБКА УСТАНОВКИ");
             logconsole("💥 " + t);
             runOnUiThread(() -> {
-                TextView retry = new TextView(this);
-                retry.setText("ПОПРОБОВАТЬ СНОВА");
-                retry.setTextColor(0xFF212121);
-                retry.setTextSize(15);
-                retry.setTypeface(Typeface.DEFAULT_BOLD);
-                retry.setGravity(Gravity.CENTER);
-                GradientDrawable g = new GradientDrawable();
-                g.setColor(AMBER);
-                g.setCornerRadius(dp(12));
-                retry.setBackground(g);
-                retry.setPadding(0, dp(14), 0, dp(14));
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.setMargins(0, dp(16), 0, 0);
-                loadingRoot.addView(retry, lp);
+                Button retry = new Button(this);
+                retry.setText("Попробовать снова");
                 retry.setOnClickListener(v -> {
                     loadingRoot.removeView(retry);
                     new Thread(this::performSetup, "setup").start();
                 });
+                loadingRoot.addView(retry);
             });
         }
     }
@@ -481,100 +505,109 @@ public class MainActivity extends Activity {
         chatRoot.setOrientation(LinearLayout.VERTICAL);
         chatRoot.setBackgroundColor(BG);
 
-        // ---------- header ----------
+        // header
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(16), dp(10), dp(8), dp(10));
-        head.setBackgroundColor(0xFF171717);
-        TextView title = tv("⚡ JimmyAgent", 17, TXT, true);
-        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.setPadding(dp(14), dp(10), dp(6), dp(10));
+        head.setBackgroundColor(HEAD);
 
-        TextView newChat = tv("✎", 20, TXT, false);
-        newChat.setGravity(Gravity.CENTER);
-        GradientDrawable nc = new GradientDrawable();
-        nc.setColor(0x00000000);
-        nc.setCornerRadius(dp(18));
-        newChat.setBackground(nc);
-        newChat.setPadding(dp(8), dp(2), dp(8), dp(2));
-        newChat.setOnClickListener(v -> onNewChat());
-        head.addView(newChat, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        TextView title = tv("⚡ JimmyAgent", 17, TXT, true);
+        titles.addView(title);
+        TextView sub = tv("codex · chatjimmy · llama3.1-8B 🦴", 11, DIM2, false);
+        titles.addView(sub);
+        head.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView filesBtn = hdrBtn("📁");
+        filesBtn.setOnClickListener(v -> showFiles());
+        head.addView(filesBtn);
+        TextView newBtn = hdrBtn("✎");
+        newBtn.setOnClickListener(v -> newChat());
+        head.addView(newBtn);
 
         chatRoot.addView(head);
         View divider = new View(this);
         divider.setBackgroundColor(LINE);
         chatRoot.addView(divider, new LinearLayout.LayoutParams(-1, 1));
 
-        // ---------- список сообщений ----------
         listView = new ListView(this);
         listView.setAdapter(adapter);
         listView.setDivider(null);
         listView.setDividerHeight(0);
         listView.setTranscriptMode(ListView.TRANSCRIPT_MODE_ALWAYS_SCROLL);
-        listView.setStackFromBottom(true);
-        listView.setClipToPadding(false);
         listView.setBackgroundColor(BG);
+        listView.setClipToPadding(false);
+        listView.setPadding(0, dp(6), 0, dp(6));
         chatRoot.addView(listView, new LinearLayout.LayoutParams(-1, 0, 1f));
 
+        // input bar
         View div2 = new View(this);
         div2.setBackgroundColor(LINE);
         chatRoot.addView(div2, new LinearLayout.LayoutParams(-1, 1));
-
-        // ---------- композер (как у ChatGPT: скруглённая капсула) ----------
-        LinearLayout composerWrap = new LinearLayout(this);
-        composerWrap.setOrientation(LinearLayout.HORIZONTAL);
-        composerWrap.setPadding(dp(12), dp(10), dp(12), dp(12));
-        composerWrap.setBackgroundColor(BG);
-
-        LinearLayout capsule = new LinearLayout(this);
-        capsule.setOrientation(LinearLayout.HORIZONTAL);
-        capsule.setGravity(Gravity.BOTTOM);
-        GradientDrawable cap = new GradientDrawable();
-        cap.setColor(PANEL);
-        cap.setCornerRadius(dp(24));
-        capsule.setBackground(cap);
-        capsule.setPadding(dp(16), dp(4), dp(6), dp(4));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.BOTTOM);
+        bar.setPadding(dp(10), dp(8), dp(10), dp(10));
+        bar.setBackgroundColor(PANEL);
 
         input = new EditText(this);
-        input.setHint("Сообщение");
+        input.setHint("Сообщение…");
         input.setHintTextColor(DIM2);
         input.setTextColor(TXT);
+        GradientDrawable pill = new GradientDrawable();
+        pill.setColor(USER_BG);
+        pill.setCornerRadius(dp(22));
+        pill.setStroke(1, LINE);
+        input.setBackground(pill);
+        input.setPadding(dp(16), dp(10), dp(16), dp(10));
         input.setTextSize(15.5f);
-        input.setBackgroundColor(0x00000000);
-        input.setInputType(InputType.TYPE_CLASS_TEXT
-                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setMinLines(1);
-        input.setMaxLines(6);
-        input.setPadding(0, dp(8), dp(8), dp(8));
-        capsule.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        input.setMaxLines(5);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        ilp.setMargins(0, 0, dp(8), 0);
+        bar.addView(input, ilp);
 
-        sendBtn = new TextView(this);
-        sendBtn.setText("↑");
-        sendBtn.setTextSize(18);
-        sendBtn.setTextColor(0xFF212121);
-        sendBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        sendBtn.setGravity(Gravity.CENTER);
-        sendBtn.setOnClickListener(v -> onSend());
-        applySendStyle();
-        capsule.addView(sendBtn, new LinearLayout.LayoutParams(dp(40), dp(40)));
-
-        composerWrap.addView(capsule, new LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT));
-        chatRoot.addView(composerWrap);
+        sendBtn = new Button(this);
+        setSendIdle();
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(AMBER);
+        sendBtn.setBackground(circle);
+        sendBtn.setTextColor(0xFF1A1A1A);
+        sendBtn.setOnClickListener(v -> {
+            if (agentBusy) stopAgent(); else onSend();
+        });
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(42), dp(42));
+        bar.addView(sendBtn, slp);
+        chatRoot.addView(bar);
 
         setContentView(chatRoot);
+        showingFiles = false;
         if (msgs.isEmpty())
-            addNote("чат подключён к Codex CLI (ChatJimmy, llama3.1-8B, ~17K tok/s). Всё локально.\n✎ — новый чат · долгий тап по сообщению — копировать");
+            addNote("чат подключён к Codex CLI (ChatJimmy, llama3.1-8B, ~17K tok/s). Всё локально.");
     }
 
-    // круглая кнопка отправки: янтарная в idle, серая ■ занято
-    private void applySendStyle() {
-        GradientDrawable g = new GradientDrawable();
-        g.setShape(GradientDrawable.OVAL);
-        g.setColor(agentBusy ? 0xFF555555 : AMBER);
-        sendBtn.setBackground(g);
-        sendBtn.setText(agentBusy ? "■" : "↑");
-        sendBtn.setTextSize(agentBusy ? 14 : 18);
+    private void setSendIdle() {
+        sendBtn.setText("↑");
+        sendBtn.setTextSize(19);
+        sendBtn.setEnabled(true);
+        if (input != null) input.setHint("Сообщение…");
+    }
+
+    private void setSendBusy() {
+        sendBtn.setText("■");
+        sendBtn.setTextSize(14);
+        sendBtn.setEnabled(true);
+        if (input != null) input.setHint("grug печатает…");
+    }
+
+    private TextView hdrBtn(String s) {
+        TextView b = tv(s, 19, DIM, false);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(12), dp(6), dp(12), dp(6));
+        return b;
     }
 
     private void addNote(String t) {
@@ -582,24 +615,26 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
     }
 
-    private void copyToClipboard(String text) {
-        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (cm != null) {
-            cm.setPrimaryClip(ClipData.newPlainText("JimmyAgent", text));
-            Toast.makeText(this, "скопировано", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void onNewChat() {
-        if (agentBusy) {
-            Toast.makeText(this, "grug занят — сначала останови (■)", Toast.LENGTH_SHORT).show();
-            return;
-        }
+    private void newChat() {
+        if (agentBusy) stopAgent();
         msgs.clear();
         hasSession = false;
+        stopRequested = false;
         adapter.notifyDataSetChanged();
-        addNote("новый чат. grug готов 🦴");
-        input.requestFocus();
+        addNote("✎ новый диалог — grug готов. файлы в песочнице остались на месте.");
+    }
+
+    private void onSend() {
+        if (agentBusy) return;
+        final String text = input.getText().toString().trim();
+        if (text.isEmpty()) return;
+        input.setText("");
+        try {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
+        } catch (Throwable ignore) { }
+        msgs.add(new Msg(text, 0));
+        startAgent(text);
     }
 
     private void onRegenerate() {
@@ -608,165 +643,187 @@ public class MainActivity extends Activity {
         for (int i = msgs.size() - 1; i >= 0; i--) {
             if (msgs.get(i).who == 0) { lastUser = msgs.get(i).text; break; }
         }
-        if (lastUser == null) {
-            Toast.makeText(this, "нечего повторять — нет твоих сообщений", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        addNote("↻ grug печатает ещё раз");
+        if (lastUser == null) return;
+        startAgent(lastUser);
+    }
+
+    private void startAgent(String prompt) {
         final Msg live = new Msg("", 1);
         msgs.add(live);
         adapter.notifyDataSetChanged();
-        setBusy(true);
-        final String text = lastUser;
-        new Thread(() -> runCodex(text, live), "codex-run").start();
-    }
-
-    private void onSend() {
-        if (agentBusy) { // кнопка превращается в «стоп»
-            stopRequested = true;
-            Process p = currentProc;
-            if (p != null) p.destroy();
-            return;
-        }
-        final String text = input.getText().toString().trim();
-        if (text.isEmpty()) return;
-        input.setText("");
-        msgs.add(new Msg(text, 0));
-        final Msg live = new Msg("", 1);
-        msgs.add(live);
+        agentBusy = true;
+        stopRequested = false;
+        setSendBusy();
         adapter.notifyDataSetChanged();
-        setBusy(true);
-        new Thread(() -> runCodex(text, live), "codex-run").start();
+        new Thread(() -> runCodex(prompt, live), "codex-run").start();
     }
 
-    private void setBusy(boolean b) {
-        agentBusy = b;
-        if (b) stopRequested = false;
-        runOnUiThread(() -> {
-            applySendStyle();
-            input.setHint(agentBusy ? "grug печатает…" : "Сообщение");
-            adapter.notifyDataSetChanged();
-        });
+    private void stopAgent() {
+        stopRequested = true;
+        Process p = currentProc;
+        if (p != null) {
+            try { p.destroy(); } catch (Throwable ignore) { }
+        }
     }
 
     // =====================================================================
-    // ЗАПУСК CODEX (со скрытыми ретраями)
+    // ЗАПУСК CODEX (пустой ответ 8B — норма: молча пробуем ещё)
     // =====================================================================
     private void runCodex(String userMsg, Msg live) {
-        // пустой ответ — норма для 8B: молча пробуем ещё раз, не дёргая юзера
         boolean answered = false;
         String err = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS && !answered && !stopRequested; attempt++) {
+            // каждая попытка рисует пузырь заново — ретраи для юзера незаметны
+            final StringBuilder acc = new StringBuilder();
+            ui.post(() -> {
+                live.text = "";
+                adapter.notifyDataSetChanged();
+            });
+            appendLive(live, acc, T_OPEN + "🦴 grug думает…\n" + T_CLOSE);
+
+            String prompt = userMsg;
+            if (attempt > 1 && hasSession) {
+                prompt = "grug, ты не ответил. Ответь кратко на ПРЕДЫДУЩИЙ запрос "
+                        + "пользователя. Обязательно начни с <think> и ответь по-русски.";
+            }
+            StringBuilder agentText = new StringBuilder();
+            boolean[] gotThread = new boolean[1];
             try {
-                answered = runCodexOnce(userMsg, live);
+                if (attempt > 1) Thread.sleep(700);
+                runCodexOnce(prompt, live, acc, agentText, gotThread);
             } catch (Throwable t) {
                 err = String.valueOf(t);
             }
-            if (stopRequested) break;
-            if (!answered && attempt < MAX_ATTEMPTS) {
-                // тихий ретрай: без уведомлений — просто снова «думает»
-                try { Thread.sleep(700); } catch (InterruptedException ignored) {}
-            }
+            if (gotThread[0]) hasSession = true;
+            answered = agentText.toString().trim().length() > 0;
         }
-        setBusy(false);
+        agentBusy = false;
+        currentProc = null;
+        ui.post(() -> {
+            setSendIdle();
+            adapter.notifyDataSetChanged();
+        });
         if (stopRequested) {
-            appendLive(live, "⏹ остановлено");
+            ui.post(() -> { live.text = stripMarkers(live.text) + "\n⏹ остановлено"; adapter.notifyDataSetChanged(); });
         } else if (!answered) {
-            appendLive(live, err != null
+            final String msg = err != null
                     ? "💥 ошибка: " + err
                     : "(grug так и не ответил за " + MAX_ATTEMPTS
-                    + " попытки — переформулируй или жми ↻ ещё раз)");
+                    + " попытки — переформулируй или жми ↻ ещё раз)";
+            ui.post(() -> {
+                live.text = msg;
+                adapter.notifyDataSetChanged();
+            });
         }
     }
 
-    // одна попытка. true — есть осмысленный ответ
-    private boolean runCodexOnce(String userMsg, Msg live) throws Exception {
-        boolean gotContent = false;
-        // каждая попытка пишет в пузырь заново (ретраи незаметны)
-        runOnUiThread(() -> {
-            live.text = "grug думает… 🦴\n";
-            adapter.notifyDataSetChanged();
-        });
+    // один заход codex; agentOut накапливает текст ответа
+    private int runCodexOnce(String prompt, Msg live, StringBuilder acc,
+                             StringBuilder agentOut, boolean[] gotThread) {
+        int exit = -1;
+        try {
+            ArrayList<String> cmd = new ArrayList<>();
+            cmd.add(codexBin.getAbsolutePath());
+            cmd.add("exec");
+            if (hasSession) {
+                cmd.add("resume");
+                cmd.add("--last");
+            }
+            cmd.add("--json");
+            cmd.add("--skip-git-repo-check");
+            cmd.add("-s");
+            cmd.add("workspace-write");
+            cmd.add(prompt);
 
-        ArrayList<String> cmd = new ArrayList<>();
-        cmd.add(codexBin.getAbsolutePath());
-        cmd.add("exec");
-        if (hasSession) {
-            cmd.add("resume");
-            cmd.add("--last");
-        }
-        cmd.add("--json");
-        cmd.add("--skip-git-repo-check");
-        cmd.add("-s");
-        cmd.add("workspace-write");
-        cmd.add(userMsg);
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        applyEnv(pb, baseEnv());
-        pb.directory(jimmyDir);
-        pb.redirectErrorStream(true);
-        Process p = pb.start();
-        currentProc = p;
-        lastEventAt = System.currentTimeMillis();
-
-        // сторожок: нет событий N секунд → убиваем попытку
-        Thread wd = new Thread(() -> {
-            try {
-                while (true) {
-                    try { p.exitValue(); break; } catch (IllegalThreadStateException alive) { /* ещё живёт */ }
-                    if (System.currentTimeMillis() - lastEventAt > IDLE_TIMEOUT_MS) {
-                        p.destroy();
-                        break;
-                    }
-                    Thread.sleep(1000);
-                }
-            } catch (Throwable ignored) {}
-        });
-        wd.setDaemon(true);
-        wd.start();
-
-        BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
-        String line;
-        boolean sawThreadStarted = false;
-        while ((line = r.readLine()) != null) {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            applyEnv(pb, baseEnv());
+            pb.directory(jimmyDir);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            currentProc = p;
             lastEventAt = System.currentTimeMillis();
-            line = line.trim();
-            if (line.isEmpty() || !line.startsWith("{")) continue;
-            try {
-                JSONObject ev = new JSONObject(line);
-                String type = ev.optString("type", "");
-                if ("thread.started".equals(type)) { sawThreadStarted = true; continue; }
-                if (!"item.completed".equals(type)) continue;
-                JSONObject item = ev.optJSONObject("item");
-                if (item == null) continue;
-                String it = item.optString("type", "");
-                if ("reasoning".equals(it)) {
-                    String t = item.optString("text", "").trim();
-                    if (!t.isEmpty()) {
-                        appendLive(live, "🦴 " + oneLine(t, 320) + "\n");
-                        gotContent = true;
+
+            // сторожок: нет событий IDLE_TIMEOUT_MS → убиваем попытку
+            Thread wd = new Thread(() -> {
+                try {
+                    while (true) {
+                        try { p.exitValue(); break; } catch (IllegalThreadStateException alive) { }
+                        if (System.currentTimeMillis() - lastEventAt > IDLE_TIMEOUT_MS) {
+                            p.destroy();
+                            break;
+                        }
+                        Thread.sleep(1000);
                     }
-                } else if ("command_execution".equals(it)) {
-                    String c = item.optString("command", "").trim();
-                    if (!c.isEmpty()) appendLive(live, "⚙ " + oneLine(c, 200) + "\n");
-                    String out = item.optString("aggregated_output", "").trim();
-                    int exit = item.optInt("exit_code", 0);
-                    if (!out.isEmpty())
-                        appendLive(live, dim(out, 500) + (exit != 0 ? " [exit " + exit + "]" : "") + "\n");
-                } else if ("agent_message".equals(it)) {
-                    String t = item.optString("text", "").trim();
-                    if (!t.isEmpty()) {
-                        appendLive(live, t + "\n");
-                        gotContent = true;
+                } catch (Throwable ignored) { }
+            });
+            wd.setDaemon(true);
+            wd.start();
+
+            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = r.readLine()) != null) {
+                lastEventAt = System.currentTimeMillis();
+                if (stopRequested) break;
+                line = line.trim();
+                if (line.isEmpty() || !line.startsWith("{")) continue;
+                try {
+                    JSONObject ev = new JSONObject(line);
+                    String type = ev.optString("type", "");
+                    if ("thread.started".equals(type)) { gotThread[0] = true; continue; }
+                    if (!"item.completed".equals(type)) continue;
+                    JSONObject item = ev.optJSONObject("item");
+                    if (item == null) continue;
+                    String it = item.optString("type", "");
+                    if ("reasoning".equals(it)) {
+                        String t = item.optString("text", "").trim();
+                        if (!t.isEmpty()) appendLive(live, acc, T_OPEN + "🦴 " + oneLine(t, 320) + "\n" + T_CLOSE);
+                    } else if ("command_execution".equals(it)) {
+                        String c = item.optString("command", "").trim();
+                        StringBuilder codeBlock = new StringBuilder();
+                        if (!c.isEmpty()) codeBlock.append("⚙ ").append(oneLine(c, 200)).append("\n");
+                        String out = item.optString("aggregated_output", "").trim();
+                        int ec = item.optInt("exit_code", 0);
+                        if (!out.isEmpty()) {
+                            codeBlock.append(dim(out, 500));
+                            if (ec != 0) codeBlock.append(" [exit ").append(ec).append("]");
+                        }
+                        if (codeBlock.length() > 0)
+                            appendLive(live, acc, C_OPEN + codeBlock + C_CLOSE + "\n");
+                    } else if ("agent_message".equals(it)) {
+                        String t = item.optString("text", "").trim();
+                        if (!t.isEmpty()) {
+                            agentOut.append(t);
+                            renderAgentText(t, live, acc);
+                        }
                     }
-                }
-            } catch (Throwable ignore) { }
+                } catch (Throwable ignore) { }
+            }
+            exit = p.waitFor();
+        } catch (Throwable t) {
+            appendLive(live, acc, T_OPEN + "💥 ошибка запуска: " + t + T_CLOSE);
+        } finally {
+            currentProc = null;
         }
-        int code = p.waitFor();
-        currentProc = null;
-        if (sawThreadStarted) hasSession = true;
-        // контент = reasoning или agent_message; одни лишь команды без ответа считаем провалом
-        return gotContent && !stopRequested;
+        return exit;
+    }
+
+    // режем ответ модели на мысли (<think>) и обычный текст — раскрашиваем
+    private void renderAgentText(String t, Msg live, StringBuilder acc) {
+        Matcher m = THINK_RX.matcher(t);
+        int last = 0;
+        while (m.find()) {
+            appendPlain(t.substring(last, m.start()), live, acc);
+            String think = m.group(1) == null ? "" : m.group(1).trim();
+            if (!think.isEmpty())
+                appendLive(live, acc, T_OPEN + "🦴 " + think + "\n" + T_CLOSE);
+            last = m.end();
+        }
+        appendPlain(t.substring(last), live, acc);
+    }
+
+    private void appendPlain(String s, Msg live, StringBuilder acc) {
+        s = s.trim();
+        if (!s.isEmpty()) appendLive(live, acc, s + "\n");
     }
 
     private String oneLine(String s, int max) {
@@ -779,11 +836,87 @@ public class MainActivity extends Activity {
         return s;
     }
 
-    private void appendLive(Msg live, String add) {
-        runOnUiThread(() -> {
-            live.text += add;
+    private void appendLive(Msg live, StringBuilder acc, String add) {
+        acc.append(add);
+        ui.post(() -> {
+            live.text = acc.toString();
             adapter.notifyDataSetChanged();
         });
+    }
+
+    // =====================================================================
+    // РАСКРАСКА МАРКЕРОВ (мысли/код) и копирование
+    // =====================================================================
+    static class RoundBgSpan implements LineBackgroundSpan {
+        private final int color;
+        RoundBgSpan(int c) { color = c; }
+        public void drawBackground(Canvas c, Paint p, int left, int right, int top,
+                                   int baseline, int bottom, CharSequence text,
+                                   int start, int end, int lineNumber) {
+            Paint paint = new Paint();
+            paint.setColor(color);
+            paint.setAntiAlias(true);
+            c.drawRoundRect(left, top, right, bottom, 14, 14, paint);
+        }
+    }
+
+    private CharSequence buildSpanned(String raw) {
+        SpannableStringBuilder out = new SpannableStringBuilder();
+        int i = 0;
+        while (i < raw.length()) {
+            int tOpen = raw.indexOf(T_OPEN, i);
+            int cOpen = raw.indexOf(C_OPEN, i);
+            int nextOpen;
+            boolean isThink;
+            if (tOpen < 0 && cOpen < 0) { nextOpen = -1; isThink = false; }
+            else if (tOpen < 0) { nextOpen = cOpen; isThink = false; }
+            else if (cOpen < 0) { nextOpen = tOpen; isThink = true; }
+            else { nextOpen = Math.min(tOpen, cOpen); isThink = tOpen < cOpen; }
+
+            if (nextOpen < 0) {
+                out.append(raw.substring(i));
+                break;
+            }
+            if (nextOpen > i) out.append(raw.substring(i, nextOpen));
+            String open = isThink ? T_OPEN : C_OPEN;
+            String close = isThink ? T_CLOSE : C_CLOSE;
+            int contentStart = nextOpen + open.length();
+            int closeAt = raw.indexOf(close, contentStart);
+            if (closeAt < 0) closeAt = raw.length();
+            String seg = raw.substring(contentStart, closeAt);
+            int s = out.length();
+            out.append(seg);
+            int e = out.length();
+            if (e > s) {
+                if (isThink) {
+                    out.setSpan(new ForegroundColorSpan(GRUG), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    out.setSpan(new StyleSpan(Typeface.ITALIC), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    out.setSpan(new RelativeSizeSpan(0.85f), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                } else {
+                    out.setSpan(new ForegroundColorSpan(CODE_TXT), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    out.setSpan(new TypefaceSpan("monospace"), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    out.setSpan(new RelativeSizeSpan(0.83f), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    out.setSpan(new RoundBgSpan(CODE_BG), s, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            }
+            i = closeAt + (closeAt < raw.length() ? close.length() : 0);
+        }
+        return out;
+    }
+
+    private String stripMarkers(String raw) {
+        return raw.replace(T_OPEN, "").replace(T_CLOSE, "")
+                .replace(C_OPEN, "").replace(C_CLOSE, "");
+    }
+
+    private void copyText(String label, String text) {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText(label, stripMarkers(text)));
+            Toast.makeText(this, "скопировано", Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "ошибка копирования: " + t, Toast.LENGTH_SHORT).show();
+        }
     }
 
     // =====================================================================
@@ -794,96 +927,268 @@ public class MainActivity extends Activity {
         public Object getItem(int i) { return msgs.get(i); }
         public long getItemId(int i) { return i; }
 
-        private int lastAssistantIndex() {
-            for (int i = msgs.size() - 1; i >= 0; i--)
-                if (msgs.get(i).who == 1) return i;
-            return -1;
-        }
-
-        public View getView(final int pos, View cv, ViewGroup parent) {
+        public View getView(int pos, View cv, ViewGroup parent) {
             final Msg m = msgs.get(pos);
-            LinearLayout row = new LinearLayout(MainActivity.this);
-            row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(dp(12), dp(5), dp(12), dp(5));
+            LinearLayout col = new LinearLayout(MainActivity.this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setPadding(dp(12), dp(4), dp(12), dp(4));
 
-            final TextView t = new TextView(MainActivity.this);
-            t.setTextSize(15.5f);
-            t.setTextColor(TXT);
-            t.setLineSpacing(3, 1.0f);
+            TextView t = new TextView(MainActivity.this);
             t.setTextIsSelectable(true);
-            t.setText(m.text.isEmpty() ? "🦴…" : m.text);
-            // долгий тап — копировать любое сообщение
-            t.setOnLongClickListener(v -> {
-                if (!m.text.isEmpty()) copyToClipboard(m.text);
-                return true;
-            });
-
+            int padH = dp(13), padV = dp(9);
             GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(18));
+
             if (m.who == 0) {
-                // пользователь — пузырь справа
+                // пользователь: серая плашка справа
+                t.setText(m.text.isEmpty() ? "…" : m.text);
+                t.setTextSize(15.5f);
+                t.setTextColor(TXT);
+                t.setLineSpacing(2, 1.0f);
                 g.setColor(USER_BG);
-                g.setCornerRadius(dp(18));
-                t.setBackground(g);
-                int padH = dp(14), padV = dp(10);
                 t.setPadding(padH, padV, padH, padV);
-                LinearLayout wrap = hwrap(Gravity.END);
+                t.setBackground(g);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.setMargins(dp(64), 0, 0, 0);
-                wrap.addView(t, lp);
-                row.addView(wrap);
+                lp.gravity = Gravity.END;
+                col.addView(t, lp);
+                col.addView(actionsRow(m, Gravity.END, false));
             } else if (m.who == 2) {
-                // системная заметка — по центру, тускло
-                t.setTextColor(DIM2);
+                // системная заметка: по центру, блеклая
+                t.setText(m.text);
                 t.setTextSize(12.5f);
+                t.setTextColor(DIM2);
                 t.setGravity(Gravity.CENTER);
-                t.setPadding(dp(8), dp(2), dp(8), dp(2));
-                row.addView(t);
+                t.setPadding(0, dp(2), 0, dp(2));
+                col.addView(t);
             } else {
-                // ассистент — на всю ширину, без пузыря (как у ChatGPT)
-                t.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
-                t.setTextSize(13.5f);
-                t.setPadding(dp(4), dp(2), dp(4), dp(2));
-                row.addView(t);
-
-                // панель действий: ⧉ копировать · ↻ ещё раз (у последнего)
-                if (!m.text.isEmpty() && !agentBusy) {
-                    LinearLayout actions = new LinearLayout(MainActivity.this);
-                    actions.setOrientation(LinearLayout.HORIZONTAL);
-                    actions.setPadding(dp(4), 0, dp(4), dp(2));
-                    actions.addView(actionChip("⧉ копировать", v -> copyToClipboard(m.text)));
-                    if (pos == lastAssistantIndex()) {
-                        actions.addView(actionChip("↻ ещё раз", v -> onRegenerate()));
-                    }
-                    row.addView(actions);
-                }
+                // агент: во всю ширину, без плашки — как в ChatGPT
+                CharSequence sp = m.text.isEmpty() ? "…" : buildSpanned(m.text);
+                t.setText(sp);
+                t.setTextSize(15.5f);
+                t.setTextColor(TXT);
+                t.setLineSpacing(3, 1.0f);
+                t.setPadding(0, padV, 0, padV);
+                col.addView(t);
+                boolean lastAndIdle = (pos == msgs.size() - 1) && !agentBusy;
+                col.addView(actionsRow(m, Gravity.START, lastAndIdle));
             }
+            return col;
+        }
+
+        // ряд действий под сообщением: ⧉ копировать · ↻ ещё раз (только последний ответ)
+        private View actionsRow(final Msg m, int grav, boolean withRegen) {
+            LinearLayout row = new LinearLayout(MainActivity.this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(grav);
+            row.addView(chip("⧉ копировать", v -> copyText("jimmyagent", m.text)));
+            if (withRegen) row.addView(chip("↻ ещё раз", v -> onRegenerate()));
             return row;
         }
 
-        private LinearLayout hwrap(int gravity) {
-            LinearLayout w = new LinearLayout(MainActivity.this);
-            w.setOrientation(LinearLayout.HORIZONTAL);
-            w.setGravity(gravity);
-            return w;
-        }
-
-        private TextView actionChip(String label, View.OnClickListener l) {
-            TextView c = new TextView(MainActivity.this);
-            c.setText(label);
-            c.setTextSize(12.5f);
-            c.setTextColor(DIM);
+        private TextView chip(String s, View.OnClickListener l) {
+            TextView b = tv(s, 11.5f, DIM2, false);
+            b.setPadding(dp(10), dp(3), dp(10), dp(3));
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0x14FFFFFF);
             bg.setCornerRadius(dp(10));
-            c.setBackground(bg);
-            c.setPadding(dp(10), dp(5), dp(10), dp(5));
+            bg.setStroke(1, LINE);
+            b.setBackground(bg);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(0, 0, dp(8), 0);
-            c.setLayoutParams(lp);
-            c.setOnClickListener(l);
-            return c;
+            lp.setMargins(0, dp(2), dp(6), dp(4));
+            b.setLayoutParams(lp);
+            b.setOnClickListener(l);
+            return b;
+        }
+    }
+
+    // =====================================================================
+    // ПАНЕЛЬ ФАЙЛОВ ПЕСОЧНИЦЫ
+    // =====================================================================
+    private void showFiles() {
+        jimmyDir.mkdirs();
+        if (filesCurDir == null || !filesCurDir.exists() || !isInside(filesCurDir, jimmyDir))
+            filesCurDir = jimmyDir;
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(6), dp(10), dp(14), dp(10));
+        head.setBackgroundColor(HEAD);
+        TextView back = hdrBtn("←");
+        back.setOnClickListener(v -> backToChat());
+        head.addView(back);
+        TextView title = tv("📦 песочница (~/jimmy)", 15, TXT, true);
+        title.setPadding(dp(8), 0, 0, 0);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(head);
+
+        View div = new View(this);
+        div.setBackgroundColor(LINE);
+        root.addView(div, new LinearLayout.LayoutParams(-1, 1));
+
+        final TextView pathLabel = tv("", 11.5f, DIM2, false);
+        pathLabel.setPadding(dp(14), dp(6), dp(14), dp(6));
+        root.addView(pathLabel);
+
+        ListView lv = new ListView(this);
+        lv.setDivider(null);
+        lv.setDividerHeight(0);
+        lv.setBackgroundColor(BG);
+        lv.setAdapter(filesAdapter);
+        root.addView(lv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        lv.setOnItemClickListener((parent, view, pos, id) -> {
+            File f = fileRows.get(pos);
+            if (f == null) { // «..»
+                File p = filesCurDir.getParentFile();
+                if (p != null && isInside(p, jimmyDir)) filesCurDir = p;
+                refillFiles(pathLabel);
+            } else if (f.isDirectory()) {
+                filesCurDir = f;
+                refillFiles(pathLabel);
+            } else {
+                viewFile(f);
+            }
+        });
+
+        showingFiles = true;
+        setContentView(root);
+        refillFiles(pathLabel);
+    }
+
+    private void refillFiles(TextView pathLabel) {
+        fileRows.clear();
+        String rel = jimmyDir.toURI().relativize(filesCurDir.toURI()).getPath();
+        pathLabel.setText(rel.isEmpty() ? "~/jimmy/" : "~/jimmy/" + rel);
+        if (!filesCurDir.equals(jimmyDir)) fileRows.add(null); // строка «..»
+        File[] kids = filesCurDir.listFiles();
+        if (kids != null) {
+            ArrayList<File> dirs = new ArrayList<>(), files = new ArrayList<>();
+            for (File k : kids) (k.isDirectory() ? dirs : files).add(k);
+            Comparator<File> byName = (a, b) -> a.getName().compareToIgnoreCase(b.getName());
+            Collections.sort(dirs, byName);
+            Collections.sort(files, byName);
+            fileRows.addAll(dirs);
+            fileRows.addAll(files);
+        }
+        filesAdapter.notifyDataSetChanged();
+    }
+
+    private boolean isInside(File f, File root) {
+        try {
+            return f.getCanonicalPath().startsWith(root.getCanonicalPath());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void backToChat() {
+        showingFiles = false;
+        setContentView(chatRoot);
+    }
+
+    class FilesAdapter extends BaseAdapter {
+        public int getCount() { return fileRows.size(); }
+        public Object getItem(int i) { return fileRows.get(i); }
+        public long getItemId(int i) { return i; }
+
+        public View getView(int pos, View cv, ViewGroup parent) {
+            File f = fileRows.get(pos);
+            TextView t = tv("", 14.5f, TXT, false);
+            t.setPadding(dp(16), dp(11), dp(16), dp(11));
+            if (f == null) {
+                t.setText("‹ ..");
+                t.setTextColor(DIM);
+            } else if (f.isDirectory()) {
+                t.setText("📁 " + f.getName() + "/");
+            } else {
+                t.setText("📄 " + f.getName() + "  ·  " + fmtSize(f.length()));
+            }
+            return t;
+        }
+    }
+
+    private String fmtSize(long n) {
+        if (n < 1024) return n + " Б";
+        if (n < 1024 * 1024) return String.format("%.1f КБ", n / 1024.0);
+        return String.format("%.1f МБ", n / 1024.0 / 1024.0);
+    }
+
+    // просмотр одного файла
+    private void viewFile(final File f) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(6), dp(10), dp(6), dp(10));
+        head.setBackgroundColor(HEAD);
+        TextView back = hdrBtn("←");
+        back.setOnClickListener(v -> showFiles());
+        head.addView(back);
+        String rel = jimmyDir.toURI().relativize(f.toURI()).getPath();
+        TextView title = tv(rel, 12.5f, DIM, false);
+        title.setPadding(dp(8), 0, 0, 0);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView copy = hdrBtn("⧉");
+        final String[] contentHolder = new String[1];
+        copy.setOnClickListener(v -> {
+            if (contentHolder[0] != null) copyText(f.getName(), contentHolder[0]);
+        });
+        head.addView(copy);
+        root.addView(head);
+
+        View div = new View(this);
+        div.setBackgroundColor(LINE);
+        root.addView(div, new LinearLayout.LayoutParams(-1, 1));
+
+        ScrollView sv = new ScrollView(this);
+        TextView body = new TextView(this);
+        body.setTypeface(Typeface.MONOSPACE);
+        body.setTextSize(12.5f);
+        body.setTextColor(TXT);
+        body.setTextIsSelectable(true);
+        body.setPadding(dp(14), dp(12), dp(14), dp(24));
+        sv.addView(body);
+        root.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        contentHolder[0] = readFileText(f);
+        body.setText(contentHolder[0]);
+        setContentView(root);
+    }
+
+    private String readFileText(File f) {
+        final int CAP = 200_000;
+        try {
+            long len = f.length();
+            FileInputStream in = new FileInputStream(f);
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int total = 0;
+            while (total < CAP) {
+                int n = in.read(buf, 0, Math.min(buf.length, CAP - total));
+                if (n < 0) break;
+                bos.write(buf, 0, n);
+                total += n;
+            }
+            in.close();
+            byte[] data = bos.toByteArray();
+            for (int i = 0; i < Math.min(data.length, 4096); i++) {
+                if (data[i] == 0) return "(бинарный файл · " + fmtSize(len) + " — не показываю)";
+            }
+            String s = new String(data, "UTF-8");
+            if (len > CAP) s += "\n\n… (показаны первые " + CAP + " символов из " + fmtSize(len) + ")";
+            return s;
+        } catch (Throwable t) {
+            return "(не удалось прочитать: " + t + ")";
         }
     }
 

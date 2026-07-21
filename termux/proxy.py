@@ -26,6 +26,23 @@ FILTERED_TOOLS = {"webfetch", "todowrite", "skill", "question", "task"}
 MODELS = {
     "llama3.1-8B": "llama3.1-8B",
 }
+# Страховка от пустых ответов: ChatJimmy «дурнеет» на слишком длинном
+# общем контексте — обрезаем самые старые сообщения истории по бюджету.
+MAX_HISTORY_CHARS = 20000
+
+
+def trim_history(chat_messages, max_chars=MAX_HISTORY_CHARS):
+    """Оставляет хвост истории в пределах max_chars (всегда хотя бы 1 сообщение)."""
+    kept = []
+    total = 0
+    for m in reversed(chat_messages):
+        c = len(m.get("content", "") or "")
+        if kept and total + c > max_chars:
+            break
+        kept.append(m)
+        total += c
+    kept.reverse()
+    return kept, len(chat_messages) - len(kept)
 
 
 def _first_sentence(text):
@@ -467,6 +484,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             else:
                 chat_messages.append({"role": role, "content": content})
+
+        # История: обрезаем старые сообщения, чтобы общий контекст не раздувался
+        chat_messages, dropped = trim_history(chat_messages)
+        if dropped:
+            log(f"history trimmed: dropped {dropped} oldest messages")
 
         # Append tool definitions to the system prompt
         full_system_prompt = system_prompt.strip()
