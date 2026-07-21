@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#212121">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>JimmyAgent</title>
+<style>
+  :root{
+    --bg:#212121; --side:#171717; --card:#2a2a2a; --bubble:#2f2f2f;
+    --line:rgba(255,255,255,.09); --txt:#ececec; --dim:#9b9b9b; --dim2:#6e6e6e;
+    --ok:#3ecf8e; --err:#ff6b6b; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--txt);font:15.5px/1.65 -apple-system,"Segoe UI",Roboto,Inter,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+  button{font-family:inherit}
+  /* ---------- header ---------- */
+  header{height:48px;flex:none;display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid var(--line)}
+  .logo{font-size:15px;font-weight:650;display:flex;align-items:center;gap:8px}
+  .logo .bolt{width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,#ffb020,#ff8a3d);display:flex;align-items:center;justify-content:center;font-size:13px}
+  .spacer{flex:1}
+  .status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+  .dot{width:7px;height:7px;border-radius:50%;background:#666}
+  .dot.ok{background:var(--ok)}
+  .dot.bad{background:var(--err)}
+  .icon-btn{background:none;border:1px solid transparent;color:var(--dim);border-radius:8px;padding:6px 9px;font-size:14px;cursor:pointer}
+  .icon-btn:hover{color:var(--txt);background:rgba(255,255,255,.06)}
+  /* ---------- layout ---------- */
+  main{flex:1;display:flex;min-height:0}
+  #chatCol{flex:1;display:flex;flex-direction:column;min-width:0}
+  /* ---------- messages ---------- */
+  #msgs{flex:1;overflow-y:auto;padding:26px 16px 10px}
+  .wrap{max-width:760px;margin:0 auto}
+  .msg{margin-bottom:26px}
+  .u-bubble{background:var(--bubble);border-radius:18px;padding:9px 16px;margin-left:auto;width:fit-content;max-width:85%;white-space:pre-wrap;word-break:break-word}
+  .agent-body{color:var(--txt)}
+  .answer{word-break:break-word}
+  .answer h1,.answer h2,.answer h3{margin:14px 0 6px;font-size:16px}
+  .answer p{margin:6px 0}
+  .answer code{font:13px var(--mono);background:rgba(255,255,255,.08);border-radius:5px;padding:1px 5px}
+  .answer pre{background:#171717;border:1px solid var(--line);border-radius:10px;padding:11px 13px;overflow-x:auto;margin:8px 0}
+  .answer pre code{background:none;padding:0;font-size:12.5px}
+  .answer ul,.answer ol{padding-left:22px;margin:6px 0}
+  .answer a{color:#7ab8ff}
+  /* ---------- steps (quiet collapsible) ---------- */
+  .stepsbox{margin-bottom:4px}
+  .stepshead{display:flex;align-items:center;gap:8px;background:none;border:none;color:var(--dim);font-size:13px;padding:2px 0;cursor:pointer;border-radius:6px}
+  .stepshead:hover{color:var(--txt)}
+  .stepshead .chev{font-size:10px;transition:transform .15s;color:var(--dim2)}
+  .stepsbox.open .stepshead .chev{transform:rotate(180deg)}
+  .spin{width:11px;height:11px;border:1.6px solid var(--dim2);border-top-color:var(--txt);border-radius:50%;animation:sp 1s linear infinite;flex:none}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .steps{display:none;padding:6px 0 4px 19px;border-left:1px solid var(--line);margin-left:5px;margin-top:6px}
+  .stepsbox.open .steps{display:block}
+  .row{padding:3px 0 3px 10px;font-size:13px;color:var(--dim);cursor:pointer;border-radius:6px}
+  .row:hover{color:var(--txt)}
+  .row .t-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:8px;background:var(--dim2);position:relative;top:-1px}
+  .row.pend .t-dot{background:#ffb020}
+  .row.ok .t-dot{background:var(--ok)}
+  .row.fail{color:#e08a8a}
+  .row.fail .t-dot{background:var(--err)}
+  .row .sum{color:var(--dim2);font-family:var(--mono);font-size:12px}
+  .row .grug{font-style:italic}
+  .detail{display:none;margin:4px 0 8px 24px;font-size:12.5px;color:var(--dim);white-space:pre-wrap;word-break:break-word;border-left:1px solid var(--line);padding:2px 0 2px 12px}
+  .detail pre{background:#171717;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:11.5px/1.55 var(--mono);overflow-x:auto;margin:6px 0 2px;white-space:pre-wrap;color:#c9c9c9}
+  .shadow-note{font-size:12px;color:var(--dim2);padding:2px 0 2px 10px}
+  /* ---------- hero (empty state) ---------- */
+  #hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:20px;display:none}
+  #hero h1{font-size:26px;font-weight:600;display:flex;gap:10px;align-items:center}
+  #hero h1 .bolt{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#ffb020,#ff8a3d);display:flex;align-items:center;justify-content:center;font-size:18px}
+  #hero p{color:var(--dim);font-size:14px;margin-bottom:18px;text-align:center}
+  .chips{display:grid;grid-template-columns:repeat(2,minmax(0,340px));gap:10px}
+  .chip{border:1px solid var(--line);border-radius:14px;padding:11px 14px;font-size:13.5px;color:var(--dim);cursor:pointer;transition:.15s;background:none;text-align:left}
+  .chip:hover{color:var(--txt);border-color:rgba(255,255,255,.25)}
+  @media (max-width:760px){.chips{grid-template-columns:1fr}}
+  /* ---------- composer ---------- */
+  #composer{flex:none;padding:12px 16px calc(16px + env(safe-area-inset-bottom))}
+  .cbox{max-width:760px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:12px 14px 8px}
+  textarea{width:100%;background:none;border:none;outline:none;resize:none;color:var(--txt);font:inherit;max-height:180px}
+  textarea::placeholder{color:var(--dim2)}
+  .crow{display:flex;align-items:center;justify-content:space-between;padding-top:4px}
+  .hint{font-size:11.5px;color:var(--dim2)}
+  #sendBtn{width:32px;height:32px;border-radius:50%;border:none;background:#ececec;color:#1a1a1a;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  #sendBtn:disabled{background:#5a5a5a;color:#2a2a2a;cursor:not-allowed}
+  /* ---------- side (files) ---------- */
+  #side{width:288px;flex:none;background:var(--side);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .side-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;font-size:13px;color:var(--dim)}
+  #filetree{flex:1;overflow-y:auto;padding:0 8px 14px;font-size:13px}
+  #filetree .empty{color:var(--dim2);font-size:12.5px;padding:4px 8px}
+  .ft-item{display:flex;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:8px;cursor:pointer;color:var(--dim)}
+  .ft-item:hover{background:rgba(255,255,255,.05);color:var(--txt)}
+  .ft-item .sz{color:var(--dim2);font-size:11px;flex:none}
+  .ft-dir{padding:5px 8px;color:var(--dim2);font-size:12px}
+  /* ---------- modal ---------- */
+  #modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:10;padding:20px}
+  #modal.open{display:flex}
+  .m-card{background:var(--card);border:1px solid var(--line);border-radius:16px;max-width:720px;width:100%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden}
+  .m-head{display:flex;justify-content:space-between;align-items:center;padding:13px 16px;border-bottom:1px solid var(--line);font:13px var(--mono);color:var(--dim)}
+  .m-close{background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer}
+  .m-close:hover{color:var(--txt)}
+  #mBody{overflow:auto;padding:14px 16px;font:12.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;color:#d4d4d4}
+  @media (max-width:900px){
+    main{flex-direction:column}
+    #side{width:100%;border-left:none;border-top:1px solid var(--line);max-height:32%}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="bolt">⚡</span> JimmyAgent</div>
+  <div class="spacer"></div>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusTxt">подключение…</span></div>
+  <button class="icon-btn" id="resetBtn" title="Новый диалог">↺</button>
+</header>
+
+<main>
+  <section id="chatCol">
+    <div id="hero">
+      <h1><span class="bolt">⚡</span> Чем могу помочь?</h1>
+      <p>Я — агент на ChatJimmy (Llama 3.1 8B · ASIC Taalas · ~17K ток/с),<br>подключённый к облачной песочнице. complexity very, very bad. 🦴</p>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div id="msgs" style="display:none"><div class="wrap" id="thread"></div></div>
+    <form id="composer">
+      <div class="cbox">
+        <textarea id="inp" rows="1" placeholder="Поставь задачу агенту…"></textarea>
+        <div class="crow">
+          <span class="hint">Enter — отправить · Shift+Enter — новая строка</span>
+          <button id="sendBtn" type="submit" title="Отправить">↑</button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <aside id="side">
+    <div class="side-head"><span>Песочница</span><button class="icon-btn" id="refreshBtn" title="Обновить">⟳</button></div>
+    <div id="filetree"><div class="empty">пока пусто — агент создаст файлы здесь</div></div>
+  </aside>
+</main>
+
+<div id="modal">
+  <div class="m-card">
+    <div class="m-head"><span id="mPath"></span><button class="m-close" id="mClose">✕</button></div>
+    <div id="mBody"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const thread = $('#thread'), msgsEl = $('#msgs'), hero = $('#hero'), inp = $('#inp'), sendBtn = $('#sendBtn');
+let busy = false, chatStarted = false;
+
+/* ---------- PWA: service worker ---------- */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+
+/* ---------- health ---------- */
+async function health(){
+  try{
+    const r = await fetch('/api/health'); const j = await r.json();
+    if(j.ok){ $('#dot').className='dot ok'; $('#statusTxt').textContent='модель онлайн'; }
+    else throw 0;
+  }catch{ $('#dot').className='dot bad'; $('#statusTxt').textContent='нет связи'; }
+}
+health(); setInterval(health, 15000);
+
+/* ---------- markdown-lite ---------- */
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function md(src){
+  let s = esc(src);
+  s = s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>'<pre><code>'+c.replace(/\n$/,'')+'</code></pre>');
+  s = s.replace(/`([^`\n]+)`/g,'<code>$1</code>');
+  s = s.replace(/^### (.*)$/gm,'<h3>$1</h3>').replace(/^## (.*)$/gm,'<h2>$1</h2>').replace(/^# (.*)$/gm,'<h1>$1</h1>');
+  s = s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+  s = s.replace(/(https?:\/\/[^\s<)]+)/g,'<a href="$1" target="_blank">$1</a>');
+  s = s.replace(/(^(?:[-*] .*(?:\n|$))+)/gm, m=>{
+    const items=m.trim().split('\n').map(l=>'<li>'+l.replace(/^[-*] /,'')+'</li>').join('');
+    return '<ul>'+items+'</ul>';});
+  return s;
+}
+
+/* ---------- thread ---------- */
+function ensureChat(){
+  if(!chatStarted){ chatStarted=true; hero.style.display='none'; msgsEl.style.display='block'; }
+}
+function scroll(){ msgsEl.scrollTop=msgsEl.scrollHeight; }
+function addUser(text){
+  ensureChat();
+  const d=document.createElement('div'); d.className='msg';
+  d.innerHTML='<div class="u-bubble">'+esc(text)+'</div>';
+  thread.appendChild(d); scroll();
+}
+function addAgent(){
+  const d=document.createElement('div'); d.className='msg agent-body';
+  d.innerHTML=
+   '<div class="stepsbox">'+
+     '<button class="stepshead" type="button"><span class="spin"></span><span class="stxt">начинаю…</span></button>'+
+     '<div class="steps"></div>'+
+   '</div>'+
+   '<div class="answer"></div>';
+  thread.appendChild(d); scroll();
+  const ui={box:d.querySelector('.stepsbox'),head:d.querySelector('.stepshead'),
+    stxt:d.querySelector('.stxt'),steps:d.querySelector('.steps'),
+    answer:d.querySelector('.answer'),rows:{},t0:Date.now(),maxStep:0,tokens:0};
+  ui.head.onclick=()=>ui.box.classList.toggle('open');
+  return ui;
+}
+const VERBS={run_shell:'выполнил',write_file:'записал',read_file:'прочитал',list_files:'посмотрел'};
+function summarize(name,args){
+  if(name==='run_shell') return (args.command||'').slice(0,80);
+  if(name==='write_file') return args.path||'';
+  if(name==='read_file') return args.path||'';
+  if(name==='list_files') return 'файлы';
+  return JSON.stringify(args);
+}
+function addToolRow(ui,ev){
+  const row=document.createElement('div'); row.className='row pend';
+  const verb=VERBS[ev.name]||ev.name;
+  row.innerHTML='<span class="t-dot"></span>'+verb+' <span class="sum">'+esc(summarize(ev.name,ev.arguments))+'</span>';
+  const det=document.createElement('div'); det.className='detail';
+  det.innerHTML='<pre>'+esc(JSON.stringify(ev.arguments,null,1))+'</pre>';
+  row.onclick=()=>{det.style.display=det.style.display==='block'?'none':'block'};
+  ui.steps.appendChild(row); ui.steps.appendChild(det);
+  ui.rows[ev.id]={row,det};
+}
+function fillTool(ui,ev){
+  const t=ui.rows[ev.id]; if(!t) return;
+  t.row.classList.remove('pend');
+  t.row.classList.add(ev.skipped?'skip':(ev.ok?'ok':'fail'));
+  if(ev.skipped){ t.row.querySelector('.t-dot').style.background='var(--dim2)';
+    const s=t.row.querySelector('.sum'); if(s) s.textContent='пропущено (дубль)'; }
+  t.det.innerHTML+='<pre>'+esc(ev.output)+'</pre>';
+}
+function addThink(ui,ev){
+  const row=document.createElement('div'); row.className='row';
+  const pv=ev.content.replace(/\s+/g,' ').trim().slice(0,90);
+  row.innerHTML='<span class="t-dot"></span><span class="grug">🦴 '+esc(pv)+(ev.content.length>90?'…':'')+'</span>';
+  const det=document.createElement('div'); det.className='detail';
+  det.textContent=ev.content;
+  row.onclick=()=>{det.style.display=det.style.display==='block'?'none':'block'};
+  ui.steps.appendChild(row); ui.steps.appendChild(det);
+}
+function addShadowNote(ui,text){
+  const d=document.createElement('div'); d.className='shadow-note'; d.textContent=text;
+  ui.steps.appendChild(d);
+}
+function fmtTotal(ms){return (ms/1000).toFixed(1)+'с'}
+
+/* ---------- events ---------- */
+function handleEvent(ui,ev){
+  switch(ev.type){
+    case 'status': ui.stxt.textContent=ev.text.replace('модель думает','grug думает'); break;
+    case 'llm': ui.maxStep=ev.step; ui.tokens+=ev.tokens||0; ui.stxt.textContent='шаг '+ev.step+' · обработка…'; break;
+    case 'thinking': ui.stxt.textContent='grug думает…'; addThink(ui,ev); break;
+    case 'tool_call': ui.stxt.textContent=(VERBS[ev.name]||ev.name)+' '+summarize(ev.name,ev.arguments).slice(0,40)+'…'; addToolRow(ui,ev); break;
+    case 'tool_result': fillTool(ui,ev); if(ev.mutates) loadFiles(); break;
+    case 'notice': addShadowNote(ui,ev.text); break;
+    case 'error': addShadowNote(ui,'⚠️ '+ev.text); break;
+    case 'message': ui.answer.innerHTML=md(ev.content); break;
+    case 'done': {
+      const sec=((Date.now()-ui.t0)/1000).toFixed(1);
+      ui.head.querySelector('.spin')?.remove();
+      ui.stxt.textContent='готово · '+ev.steps+' шаг. · '+sec+'с';
+      ui.head.insertAdjacentHTML('beforeend','<span class="chev">▼</span>');
+      break;
+    }
+  }
+  scroll();
+}
+
+/* ---------- send ---------- */
+async function send(text){
+  if(busy) return; busy=true; sendBtn.disabled=true; inp.value=''; autoresize();
+  addUser(text);
+  const ui=addAgent();
+  try{
+    const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:text})});
+    if(!resp.ok){ let m='HTTP '+resp.status; try{m=(await resp.json()).error||m}catch{}; throw new Error(m); }
+    const reader=resp.body.getReader(); const dec=new TextDecoder(); let buf='';
+    while(true){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      let i;
+      while((i=buf.indexOf('\n\n'))>=0){
+        const chunk=buf.slice(0,i); buf=buf.slice(i+2);
+        const line=chunk.split('\n').find(l=>l.startsWith('data: '));
+        if(!line) continue;
+        let ev; try{ev=JSON.parse(line.slice(6))}catch{continue}
+        handleEvent(ui,ev);
+      }
+    }
+  }catch(e){
+    addShadowNote(ui,'⚠️ '+e.message);
+    ui.head.querySelector('.spin')?.remove();
+    ui.stxt.textContent='ошибка';
+  }finally{
+    busy=false; sendBtn.disabled=false; loadFiles(); scroll();
+  }
+}
+$('#composer').addEventListener('submit',e=>{e.preventDefault();const t=inp.value.trim(); if(t) send(t);});
+inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const t=inp.value.trim();if(t)send(t);}});
+function autoresize(){ inp.style.height='auto'; inp.style.height=Math.min(inp.scrollHeight,180)+'px'; }
+inp.addEventListener('input',autoresize);
+
+/* ---------- chips (hero) ---------- */
+const CHIPS=[
+  'Создай файл hello.txt с приветствием и покажи список файлов',
+  'Скрипт primes.py: простые числа до 100, запусти, результат в primes.txt',
+  'Собери тёмную страницу-визитку index.html + style.css',
+  'Покажи uname, версию python3 и свободное место в песочнице'
+];
+CHIPS.forEach(c=>{const b=document.createElement('button');b.className='chip';b.textContent=c;
+  b.onclick=()=>{if(!busy)send(c)};$('#chips').appendChild(b);});
+
+/* ---------- reset ---------- */
+$('#resetBtn').onclick=async()=>{
+  await fetch('/api/reset',{method:'POST'});
+  thread.innerHTML=''; chatStarted=false; msgsEl.style.display='none'; hero.style.display='flex';
+};
+
+/* ---------- files ---------- */
+async function loadFiles(){
+  try{
+    const r=await fetch('/api/files'); const j=await r.json();
+    const ft=$('#filetree'); ft.innerHTML='';
+    if(!j.ok||!j.entries||!j.entries.length){ft.innerHTML='<div class="empty">пока пусто — агент создаст файлы здесь</div>';return;}
+    j.entries.forEach(e=>{
+      const d=document.createElement('div');
+      if(e.type==='dir'){d.className='ft-dir';d.textContent=e.path+'/';}
+      else{d.className='ft-item';
+        d.innerHTML='<span>'+esc(e.path)+'</span><span class="sz">'+(e.size||0)+' B</span>';
+        d.onclick=()=>viewFile(e.path);}
+      ft.appendChild(d);
+    });
+  }catch{}
+}
+async function viewFile(p){
+  try{
+    const r=await fetch('/api/file?path='+encodeURIComponent(p)); const j=await r.json();
+    if(!j.ok)return;
+    $('#mPath').textContent=p; $('#mBody').textContent=j.content;
+    $('#modal').classList.add('open');
+  }catch{}
+}
+$('#mClose').onclick=()=>$('#modal').classList.remove('open');
+$('#modal').onclick=e=>{if(e.target.id==='modal')$('#modal').classList.remove('open')};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#modal').classList.remove('open')});
+$('#refreshBtn').onclick=loadFiles;
+
+hero.style.display='flex';
+loadFiles();
+</script>
+</body>
+</html>
