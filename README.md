@@ -1,5 +1,35 @@
 # ⚡ JimmyAgent — нативный Android APK (офлайн-агент)
 
+Два способа запуска агента на телефоне — оба **полностью локальные, без Cloudflare**:
+
+## 🤖 Вариант 1: Codex CLI в Termux (рекомендую!)
+
+**Codex CLI + ChatJimmy прокся на телефоне**. Нативный терминальный интерфейс (TUI) прямо в Termux. Проверено: промпт 8,2K символов (в лимите), провайдер коннектится, инструменты вызываются.
+
+**Установка одной строкой в Termux:**
+```bash
+curl -sL https://raw.githubusercontent.com/FreedoomForm/jimmy-agent-android/main/termux/install.sh | bash
+```
+
+**Запуск:**
+```bash
+proot-distro login ubuntu -- bash /root/jimmy-codex/run.sh
+```
+
+Что происходит: в Ubuntu-окружении (proot) поднимается `proxy.py` (ChatJimmy → OpenAI API на `127.0.0.1:4100`), стартует Codex CLI с провайдером `chatjimmy` и нашим `AGENTS.md` (grug-протокол мышления 🦴).
+
+> 📌 Важно: закреплена версия **@openai/codex@0.69.0** — в новых версиях удалили `wire_api = "chat"`, с которым работает jimmy-proxy.
+
+| Файл | Назначение |
+|---|---|
+| `termux/install.sh` | установка всего стека в Termux (proot Ubuntu + node + codex + python) |
+| `termux/run.sh` | запуск: прокси + Codex |
+| `termux/config.toml` | провайдер Codex → `127.0.0.1:4100/v1` |
+| `termux/AGENTS.md` | системный промпт: grug-think CoT + правила простоты |
+| `termux/proxy.py` | jimmy-proxy (ChatJimmy ⇄ OpenAI-compatible) |
+
+## 📱 Вариант 2: Нативный APK (Chaquopy)
+
 Нативное Android-приложение: **Python-стек агента встроен в APK** (через [Chaquopy](https://chaquo.com/chaquopy/)) — агент, прокси `jimmy-proxy` и файловая песочница работают **полностью на телефоне, без облака**. UI открывается в WebView с локального сервера `http://127.0.0.1:8000` (порты loopback не требуют разрешений).
 
 - Мозг: [ChatJimmy](https://chatjimmy.ai/) — Llama 3.1 8B на ASIC Taalas (~17K ток/с, без API-ключей). Интернет нужен только для ответов модели.

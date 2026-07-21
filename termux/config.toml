@@ -1,0 +1,10 @@
+# Codex CLI → ChatJimmy через jimmy-proxy (без облака, без ключей)
+model = "llama3.1-8B"
+model_provider = "chatjimmy"
+approval_policy = "never"
+
+[model_providers.chatjimmy]
+name = "ChatJimmy via jimmy-proxy (Taalas ASIC, ~17K tok/s)"
+base_url = "http://127.0.0.1:4100/v1"
+env_key = "CHATJIMMY_API_KEY"
+wire_api = "chat"
