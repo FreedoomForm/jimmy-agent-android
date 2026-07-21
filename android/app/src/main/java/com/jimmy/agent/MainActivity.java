@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.3.1";
+    private static final String VERSION = "0.3.2";
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -129,6 +129,7 @@ public class MainActivity extends Activity {
         adapter = new ChatAdapter();
         filesAdapter = new FilesAdapter();
         if (setupDone) {
+            refreshAssetsIfNeeded();
             startProxy();
             showChat();
         } else {
@@ -242,6 +243,7 @@ public class MainActivity extends Activity {
             copyAsset("jimmy/AGENTS.md", new File(jimmyDir, "AGENTS.md"));
             copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
             logconsole("AGENTS.md + config.toml ✔");
+            refreshAssetsIfNeeded(); // отметить версию ассетов
 
             status("проверяю bash…");
             File bash = new File(usr, "bin/bash");
@@ -276,6 +278,30 @@ public class MainActivity extends Activity {
                 loadingRoot.addView(retry);
             });
         }
+    }
+
+    // при обновлении APK поверх старого: подтягиваем свежие AGENTS.md/config.toml
+    // (полный setup не запускается, а они могли измениться в новой версии)
+    private void refreshAssetsIfNeeded() {
+        try {
+            File marker = new File(filesDir, ".assets_v");
+            String cur = "";
+            if (marker.exists()) {
+                BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(marker)));
+                String l = br.readLine();
+                br.close();
+                if (l != null) cur = l.trim();
+            }
+            if (!VERSION.equals(cur)) {
+                jimmyDir.mkdirs();
+                new File(home, ".codex").mkdirs();
+                copyAsset("jimmy/AGENTS.md", new File(jimmyDir, "AGENTS.md"));
+                copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
+                FileOutputStream fos = new FileOutputStream(marker);
+                fos.write((VERSION + "\n").getBytes("UTF-8"));
+                fos.close();
+            }
+        } catch (Throwable ignore) { }
     }
 
     // ---------- zip ----------
