@@ -1,25 +1,27 @@
 package com.jimmy.agent;
 
 import android.app.Activity;
-import android.graphics.Color;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.system.Os;
+import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.webkit.WebView; // unused, kept minimal
 import android.widget.BaseAdapter;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
@@ -27,14 +29,11 @@ import com.chaquo.python.android.AndroidPlatform;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -46,15 +45,20 @@ public class MainActivity extends Activity {
 
     // ---------- константы ----------
     private static final String TERMUX_USR = "/data/data/com.termux/files/usr";
-    private static final int BG = 0xFF212121, PANEL = 0xFF2A2A2A, LINE = 0x22FFFFFF,
+    private static final int BG = 0xFF212121, PANEL = 0xFF2F2F2F, LINE = 0x22FFFFFF,
             TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
-            AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF;
-    private static final String VERSION = "0.2.1";
+            AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F;
+    private static final String VERSION = "0.3.0";
+    private static final int MAX_ATTEMPTS = 3;      // скрытые ретраи при пустом ответе
+    private static final long IDLE_TIMEOUT_MS = 120000; // сторожок "зависшего" ответа
 
     private File filesDir, usr, home, jimmyDir, codexBin;
     private boolean hasSession = false;
     private boolean setupDone = false;
     private volatile boolean agentBusy = false;
+    private volatile Process currentProc = null;
+    private volatile boolean stopRequested = false;
+    private volatile long lastEventAt = 0;
 
     // ---------- загрузчик ----------
     private LinearLayout loadingRoot;
@@ -65,7 +69,7 @@ public class MainActivity extends Activity {
     private LinearLayout chatRoot;
     private ListView listView;
     private EditText input;
-    private Button sendBtn;
+    private TextView sendBtn;
     private final ArrayList<Msg> msgs = new ArrayList<>();
     private ChatAdapter adapter;
 
@@ -100,6 +104,15 @@ public class MainActivity extends Activity {
             showLoading();
             new Thread(this::performSetup, "setup").start();
         }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (agentBusy) { // сначала останавливаем генерацию, а не выходим
+            onSend();
+            return;
+        }
+        moveTaskToBack(true); // сворачиваемся, чтобы прокси дожил в фоне
     }
 
     // =====================================================================
@@ -218,13 +231,25 @@ public class MainActivity extends Activity {
             status("ОШИБКА УСТАНОВКИ");
             logconsole("💥 " + t);
             runOnUiThread(() -> {
-                Button retry = new Button(this);
-                retry.setText("Попробовать снова");
+                TextView retry = new TextView(this);
+                retry.setText("ПОПРОБОВАТЬ СНОВА");
+                retry.setTextColor(0xFF212121);
+                retry.setTextSize(15);
+                retry.setTypeface(Typeface.DEFAULT_BOLD);
+                retry.setGravity(Gravity.CENTER);
+                GradientDrawable g = new GradientDrawable();
+                g.setColor(AMBER);
+                g.setCornerRadius(dp(12));
+                retry.setBackground(g);
+                retry.setPadding(0, dp(14), 0, dp(14));
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.setMargins(0, dp(16), 0, 0);
+                loadingRoot.addView(retry, lp);
                 retry.setOnClickListener(v -> {
                     loadingRoot.removeView(retry);
                     new Thread(this::performSetup, "setup").start();
                 });
-                loadingRoot.addView(retry);
             });
         }
     }
@@ -345,7 +370,6 @@ public class MainActivity extends Activity {
                 }
                 fos.close();
             } else {
-                // skip payload
                 long remain = size;
                 byte[] data = new byte[512];
                 while (remain > 0) { readFully(in, data, 512); remain -= 512; }
@@ -450,63 +474,107 @@ public class MainActivity extends Activity {
     }
 
     // =====================================================================
-    // ЧАТ (нативный)
+    // ЧАТ (нативный, в стиле ChatGPT)
     // =====================================================================
     private void showChat() {
         chatRoot = new LinearLayout(this);
         chatRoot.setOrientation(LinearLayout.VERTICAL);
         chatRoot.setBackgroundColor(BG);
 
-        // header
+        // ---------- header ----------
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(14), dp(8), dp(14), dp(8));
+        head.setPadding(dp(16), dp(10), dp(8), dp(10));
         head.setBackgroundColor(0xFF171717);
-        TextView title = tv("⚡ JimmyAgent", 16, TXT, true);
+        TextView title = tv("⚡ JimmyAgent", 17, TXT, true);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView ver = tv("codex · chatjimmy 🦴", 12, DIM, false);
-        head.addView(ver);
+
+        TextView newChat = tv("✎", 20, TXT, false);
+        newChat.setGravity(Gravity.CENTER);
+        GradientDrawable nc = new GradientDrawable();
+        nc.setColor(0x00000000);
+        nc.setCornerRadius(dp(18));
+        newChat.setBackground(nc);
+        newChat.setPadding(dp(8), dp(2), dp(8), dp(2));
+        newChat.setOnClickListener(v -> onNewChat());
+        head.addView(newChat, new LinearLayout.LayoutParams(dp(36), dp(36)));
+
+        chatRoot.addView(head);
         View divider = new View(this);
         divider.setBackgroundColor(LINE);
-        chatRoot.addView(head);
         chatRoot.addView(divider, new LinearLayout.LayoutParams(-1, 1));
 
+        // ---------- список сообщений ----------
         listView = new ListView(this);
         listView.setAdapter(adapter);
         listView.setDivider(null);
         listView.setDividerHeight(0);
         listView.setTranscriptMode(ListView.TRANSCRIPT_MODE_ALWAYS_SCROLL);
+        listView.setStackFromBottom(true);
+        listView.setClipToPadding(false);
         listView.setBackgroundColor(BG);
         chatRoot.addView(listView, new LinearLayout.LayoutParams(-1, 0, 1f));
 
-        // input bar
         View div2 = new View(this);
         div2.setBackgroundColor(LINE);
         chatRoot.addView(div2, new LinearLayout.LayoutParams(-1, 1));
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(10), dp(8), dp(10), dp(8));
-        bar.setBackgroundColor(PANEL);
+
+        // ---------- композер (как у ChatGPT: скруглённая капсула) ----------
+        LinearLayout composerWrap = new LinearLayout(this);
+        composerWrap.setOrientation(LinearLayout.HORIZONTAL);
+        composerWrap.setPadding(dp(12), dp(10), dp(12), dp(12));
+        composerWrap.setBackgroundColor(BG);
+
+        LinearLayout capsule = new LinearLayout(this);
+        capsule.setOrientation(LinearLayout.HORIZONTAL);
+        capsule.setGravity(Gravity.BOTTOM);
+        GradientDrawable cap = new GradientDrawable();
+        cap.setColor(PANEL);
+        cap.setCornerRadius(dp(24));
+        capsule.setBackground(cap);
+        capsule.setPadding(dp(16), dp(4), dp(6), dp(4));
+
         input = new EditText(this);
-        input.setHint("сообщение grug…");
+        input.setHint("Сообщение");
         input.setHintTextColor(DIM2);
         input.setTextColor(TXT);
-        input.setBackgroundColor(PANEL);
-        input.setPadding(dp(12), 0, dp(12), 0);
-        input.setTextSize(15);
+        input.setTextSize(15.5f);
+        input.setBackgroundColor(0x00000000);
+        input.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setMinLines(1);
-        input.setMaxLines(4);
-        bar.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        sendBtn = new Button(this);
-        sendBtn.setText("⚡");
+        input.setMaxLines(6);
+        input.setPadding(0, dp(8), dp(8), dp(8));
+        capsule.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        sendBtn = new TextView(this);
+        sendBtn.setText("↑");
+        sendBtn.setTextSize(18);
+        sendBtn.setTextColor(0xFF212121);
+        sendBtn.setTypeface(Typeface.DEFAULT_BOLD);
+        sendBtn.setGravity(Gravity.CENTER);
         sendBtn.setOnClickListener(v -> onSend());
-        bar.addView(sendBtn);
-        chatRoot.addView(bar);
+        applySendStyle();
+        capsule.addView(sendBtn, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        composerWrap.addView(capsule, new LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT));
+        chatRoot.addView(composerWrap);
 
         setContentView(chatRoot);
-        addNote("чат подключён к Codex CLI (ChatJimmy, llama3.1-8B, ~17K tok/s). Всё локально.");
+        if (msgs.isEmpty())
+            addNote("чат подключён к Codex CLI (ChatJimmy, llama3.1-8B, ~17K tok/s). Всё локально.\n✎ — новый чат · долгий тап по сообщению — копировать");
+    }
+
+    // круглая кнопка отправки: янтарная в idle, серая ■ занято
+    private void applySendStyle() {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(agentBusy ? 0xFF555555 : AMBER);
+        sendBtn.setBackground(g);
+        sendBtn.setText(agentBusy ? "■" : "↑");
+        sendBtn.setTextSize(agentBusy ? 14 : 18);
     }
 
     private void addNote(String t) {
@@ -514,8 +582,52 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
     }
 
-    private void onSend() {
+    private void copyToClipboard(String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) {
+            cm.setPrimaryClip(ClipData.newPlainText("JimmyAgent", text));
+            Toast.makeText(this, "скопировано", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void onNewChat() {
+        if (agentBusy) {
+            Toast.makeText(this, "grug занят — сначала останови (■)", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        msgs.clear();
+        hasSession = false;
+        adapter.notifyDataSetChanged();
+        addNote("новый чат. grug готов 🦴");
+        input.requestFocus();
+    }
+
+    private void onRegenerate() {
         if (agentBusy) return;
+        String lastUser = null;
+        for (int i = msgs.size() - 1; i >= 0; i--) {
+            if (msgs.get(i).who == 0) { lastUser = msgs.get(i).text; break; }
+        }
+        if (lastUser == null) {
+            Toast.makeText(this, "нечего повторять — нет твоих сообщений", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        addNote("↻ grug печатает ещё раз");
+        final Msg live = new Msg("", 1);
+        msgs.add(live);
+        adapter.notifyDataSetChanged();
+        setBusy(true);
+        final String text = lastUser;
+        new Thread(() -> runCodex(text, live), "codex-run").start();
+    }
+
+    private void onSend() {
+        if (agentBusy) { // кнопка превращается в «стоп»
+            stopRequested = true;
+            Process p = currentProc;
+            if (p != null) p.destroy();
+            return;
+        }
         final String text = input.getText().toString().trim();
         if (text.isEmpty()) return;
         input.setText("");
@@ -523,88 +635,138 @@ public class MainActivity extends Activity {
         final Msg live = new Msg("", 1);
         msgs.add(live);
         adapter.notifyDataSetChanged();
-        agentBusy = true;
-        sendBtn.setEnabled(false);
+        setBusy(true);
         new Thread(() -> runCodex(text, live), "codex-run").start();
     }
 
+    private void setBusy(boolean b) {
+        agentBusy = b;
+        if (b) stopRequested = false;
+        runOnUiThread(() -> {
+            applySendStyle();
+            input.setHint(agentBusy ? "grug печатает…" : "Сообщение");
+            adapter.notifyDataSetChanged();
+        });
+    }
+
     // =====================================================================
-    // ЗАПУСК CODEX
+    // ЗАПУСК CODEX (со скрытыми ретраями)
     // =====================================================================
     private void runCodex(String userMsg, Msg live) {
-        StringBuilder acc = new StringBuilder();
-        try {
-            ArrayList<String> cmd = new ArrayList<>();
-            cmd.add(codexBin.getAbsolutePath());
-            cmd.add("exec");
-            if (hasSession) {
-                cmd.add("resume");
-                cmd.add("--last");
+        // пустой ответ — норма для 8B: молча пробуем ещё раз, не дёргая юзера
+        boolean answered = false;
+        String err = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS && !answered && !stopRequested; attempt++) {
+            try {
+                answered = runCodexOnce(userMsg, live);
+            } catch (Throwable t) {
+                err = String.valueOf(t);
             }
-            cmd.add("--json");
-            cmd.add("--skip-git-repo-check");
-            cmd.add("-s");
-            cmd.add("workspace-write");
-            cmd.add(userMsg);
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            applyEnv(pb, baseEnv());
-            pb.directory(jimmyDir);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            appendLive(live, acc, "grug думает… 🦴\n");
-            BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            String line;
-            boolean sawThreadStarted = false;
-            while ((line = r.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) continue;
-                if (!line.startsWith("{")) {
-                    // не-JSON строки (шапка codex exec) — пропускаем
-                    continue;
-                }
-                try {
-                    JSONObject ev = new JSONObject(line);
-                    String type = ev.optString("type", "");
-                    if ("thread.started".equals(type)) { sawThreadStarted = true; continue; }
-                    if (!"item.completed".equals(type)) continue;
-                    JSONObject item = ev.optJSONObject("item");
-                    if (item == null) continue;
-                    String it = item.optString("type", "");
-                    if ("reasoning".equals(it)) {
-                        String t = item.optString("text", "").trim();
-                        if (!t.isEmpty()) appendLive(live, acc, "🦴 " + oneLine(t, 320) + "\n");
-                    } else if ("command_execution".equals(it)) {
-                        String c = item.optString("command", "").trim();
-                        if (!c.isEmpty()) {
-                            appendLive(live, acc, "⚙ " + oneLine(c, 200) + "\n");
-                        }
-                        String out = item.optString("aggregated_output", "").trim();
-                        int exit = item.optInt("exit_code", 0);
-                        if (!out.isEmpty()) {
-                            appendLive(live, acc, dim(out, 500) + (exit != 0 ? " [exit " + exit + "]" : "") + "\n");
-                        }
-                    } else if ("agent_message".equals(it)) {
-                        String t = item.optString("text", "").trim();
-                        if (!t.isEmpty()) appendLive(live, acc, t + "\n");
-                    }
-                } catch (Throwable ignore) { }
+            if (stopRequested) break;
+            if (!answered && attempt < MAX_ATTEMPTS) {
+                // тихий ретрай: без уведомлений — просто снова «думает»
+                try { Thread.sleep(700); } catch (InterruptedException ignored) {}
             }
-            int code = p.waitFor();
-            if (sawThreadStarted) hasSession = true;
-            if (acc.length() == 0 || acc.toString().trim().equals("grug думает… 🦴")) {
-                appendLive(live, acc, "(модель вернула пустой ответ — попробуй ещё раз, grug иногда залипает) exit=" + code);
-            }
-        } catch (Throwable t) {
-            appendLive(live, acc, "💥 ошибка: " + t);
-        } finally {
-            agentBusy = false;
-            runOnUiThread(() -> {
-                sendBtn.setEnabled(true);
-                adapter.notifyDataSetChanged();
-            });
         }
+        setBusy(false);
+        if (stopRequested) {
+            appendLive(live, "⏹ остановлено");
+        } else if (!answered) {
+            appendLive(live, err != null
+                    ? "💥 ошибка: " + err
+                    : "(grug так и не ответил за " + MAX_ATTEMPTS
+                    + " попытки — переформулируй или жми ↻ ещё раз)");
+        }
+    }
+
+    // одна попытка. true — есть осмысленный ответ
+    private boolean runCodexOnce(String userMsg, Msg live) throws Exception {
+        boolean gotContent = false;
+        // каждая попытка пишет в пузырь заново (ретраи незаметны)
+        runOnUiThread(() -> {
+            live.text = "grug думает… 🦴\n";
+            adapter.notifyDataSetChanged();
+        });
+
+        ArrayList<String> cmd = new ArrayList<>();
+        cmd.add(codexBin.getAbsolutePath());
+        cmd.add("exec");
+        if (hasSession) {
+            cmd.add("resume");
+            cmd.add("--last");
+        }
+        cmd.add("--json");
+        cmd.add("--skip-git-repo-check");
+        cmd.add("-s");
+        cmd.add("workspace-write");
+        cmd.add(userMsg);
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        applyEnv(pb, baseEnv());
+        pb.directory(jimmyDir);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        currentProc = p;
+        lastEventAt = System.currentTimeMillis();
+
+        // сторожок: нет событий N секунд → убиваем попытку
+        Thread wd = new Thread(() -> {
+            try {
+                while (true) {
+                    try { p.exitValue(); break; } catch (IllegalThreadStateException alive) { /* ещё живёт */ }
+                    if (System.currentTimeMillis() - lastEventAt > IDLE_TIMEOUT_MS) {
+                        p.destroy();
+                        break;
+                    }
+                    Thread.sleep(1000);
+                }
+            } catch (Throwable ignored) {}
+        });
+        wd.setDaemon(true);
+        wd.start();
+
+        BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
+        String line;
+        boolean sawThreadStarted = false;
+        while ((line = r.readLine()) != null) {
+            lastEventAt = System.currentTimeMillis();
+            line = line.trim();
+            if (line.isEmpty() || !line.startsWith("{")) continue;
+            try {
+                JSONObject ev = new JSONObject(line);
+                String type = ev.optString("type", "");
+                if ("thread.started".equals(type)) { sawThreadStarted = true; continue; }
+                if (!"item.completed".equals(type)) continue;
+                JSONObject item = ev.optJSONObject("item");
+                if (item == null) continue;
+                String it = item.optString("type", "");
+                if ("reasoning".equals(it)) {
+                    String t = item.optString("text", "").trim();
+                    if (!t.isEmpty()) {
+                        appendLive(live, "🦴 " + oneLine(t, 320) + "\n");
+                        gotContent = true;
+                    }
+                } else if ("command_execution".equals(it)) {
+                    String c = item.optString("command", "").trim();
+                    if (!c.isEmpty()) appendLive(live, "⚙ " + oneLine(c, 200) + "\n");
+                    String out = item.optString("aggregated_output", "").trim();
+                    int exit = item.optInt("exit_code", 0);
+                    if (!out.isEmpty())
+                        appendLive(live, dim(out, 500) + (exit != 0 ? " [exit " + exit + "]" : "") + "\n");
+                } else if ("agent_message".equals(it)) {
+                    String t = item.optString("text", "").trim();
+                    if (!t.isEmpty()) {
+                        appendLive(live, t + "\n");
+                        gotContent = true;
+                    }
+                }
+            } catch (Throwable ignore) { }
+        }
+        int code = p.waitFor();
+        currentProc = null;
+        if (sawThreadStarted) hasSession = true;
+        // контент = reasoning или agent_message; одни лишь команды без ответа считаем провалом
+        return gotContent && !stopRequested;
     }
 
     private String oneLine(String s, int max) {
@@ -617,10 +779,9 @@ public class MainActivity extends Activity {
         return s;
     }
 
-    private void appendLive(Msg live, StringBuilder acc, String add) {
-        acc.append(add);
+    private void appendLive(Msg live, String add) {
         runOnUiThread(() -> {
-            live.text = acc.toString();
+            live.text += add;
             adapter.notifyDataSetChanged();
         });
     }
@@ -633,47 +794,96 @@ public class MainActivity extends Activity {
         public Object getItem(int i) { return msgs.get(i); }
         public long getItemId(int i) { return i; }
 
-        public View getView(int pos, View cv, ViewGroup parent) {
-            Msg m = msgs.get(pos);
+        private int lastAssistantIndex() {
+            for (int i = msgs.size() - 1; i >= 0; i--)
+                if (msgs.get(i).who == 1) return i;
+            return -1;
+        }
+
+        public View getView(final int pos, View cv, ViewGroup parent) {
+            final Msg m = msgs.get(pos);
             LinearLayout row = new LinearLayout(MainActivity.this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(dp(12), dp(4), dp(12), dp(4));
-            TextView t = new TextView(MainActivity.this);
-            t.setTextSize(15);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(12), dp(5), dp(12), dp(5));
+
+            final TextView t = new TextView(MainActivity.this);
+            t.setTextSize(15.5f);
             t.setTextColor(TXT);
-            t.setLineSpacing(2, 1.0f);
+            t.setLineSpacing(3, 1.0f);
             t.setTextIsSelectable(true);
-            t.setText(m.text.isEmpty() ? "…" : m.text);
-            int padH = dp(13), padV = dp(9);
-            t.setPadding(padH, padV, padH, padV);
+            t.setText(m.text.isEmpty() ? "🦴…" : m.text);
+            // долгий тап — копировать любое сообщение
+            t.setOnLongClickListener(v -> {
+                if (!m.text.isEmpty()) copyToClipboard(m.text);
+                return true;
+            });
+
             GradientDrawable g = new GradientDrawable();
-            g.setCornerRadius(dp(14));
             if (m.who == 0) {
+                // пользователь — пузырь справа
                 g.setColor(USER_BG);
-                row.setGravity(Gravity.END);
+                g.setCornerRadius(dp(18));
+                t.setBackground(g);
+                int padH = dp(14), padV = dp(10);
+                t.setPadding(padH, padV, padH, padV);
+                LinearLayout wrap = hwrap(Gravity.END);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.setMargins(dp(64), 0, 0, 0);
-                row.addView(t, lp);
+                wrap.addView(t, lp);
+                row.addView(wrap);
             } else if (m.who == 2) {
-                g.setColor(0x00000000);
+                // системная заметка — по центру, тускло
                 t.setTextColor(DIM2);
                 t.setTextSize(12.5f);
-                row.setGravity(Gravity.CENTER_HORIZONTAL);
-                t.setPadding(0, dp(2), 0, dp(2));
+                t.setGravity(Gravity.CENTER);
+                t.setPadding(dp(8), dp(2), dp(8), dp(2));
                 row.addView(t);
             } else {
-                g.setColor(0x10FFFFFF);
-                row.setGravity(Gravity.START);
+                // ассистент — на всю ширину, без пузыря (как у ChatGPT)
                 t.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
                 t.setTextSize(13.5f);
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.setMargins(0, 0, dp(32), 0);
-                row.addView(t, lp);
+                t.setPadding(dp(4), dp(2), dp(4), dp(2));
+                row.addView(t);
+
+                // панель действий: ⧉ копировать · ↻ ещё раз (у последнего)
+                if (!m.text.isEmpty() && !agentBusy) {
+                    LinearLayout actions = new LinearLayout(MainActivity.this);
+                    actions.setOrientation(LinearLayout.HORIZONTAL);
+                    actions.setPadding(dp(4), 0, dp(4), dp(2));
+                    actions.addView(actionChip("⧉ копировать", v -> copyToClipboard(m.text)));
+                    if (pos == lastAssistantIndex()) {
+                        actions.addView(actionChip("↻ ещё раз", v -> onRegenerate()));
+                    }
+                    row.addView(actions);
+                }
             }
-            t.setBackground(g);
             return row;
+        }
+
+        private LinearLayout hwrap(int gravity) {
+            LinearLayout w = new LinearLayout(MainActivity.this);
+            w.setOrientation(LinearLayout.HORIZONTAL);
+            w.setGravity(gravity);
+            return w;
+        }
+
+        private TextView actionChip(String label, View.OnClickListener l) {
+            TextView c = new TextView(MainActivity.this);
+            c.setText(label);
+            c.setTextSize(12.5f);
+            c.setTextColor(DIM);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(0x14FFFFFF);
+            bg.setCornerRadius(dp(10));
+            c.setBackground(bg);
+            c.setPadding(dp(10), dp(5), dp(10), dp(5));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, dp(8), 0);
+            c.setLayoutParams(lp);
+            c.setOnClickListener(l);
+            return c;
         }
     }
 
