@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
     private static final int BG = 0xFF212121, PANEL = 0xFF2A2A2A, LINE = 0x22FFFFFF,
             TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF;
-    private static final String VERSION = "0.2";
+    private static final String VERSION = "0.2.1";
 
     private File filesDir, usr, home, jimmyDir, codexBin;
     private boolean hasSession = false;
@@ -195,9 +195,14 @@ public class MainActivity extends Activity {
             logconsole("AGENTS.md + config.toml ✔");
 
             status("проверяю bash…");
-            String out = runAndWait(new String[]{usr + "/bin/bash", "-c",
-                    "echo bash-ok && uname -m"}, baseEnv(), null);
-            logconsole(out.trim());
+            File bash = new File(usr, "bin/bash");
+            Os.chmod(bash.getAbsolutePath(), 0755);
+            logconsole("bash: exists=" + bash.exists() + " size=" + bash.length()
+                    + " canExecute=" + bash.canExecute());
+            String out = runAndWait(new String[]{bash.getAbsolutePath(), "-c",
+                    "echo bash-ok && uname -m && ls / >/dev/null && echo io-ok"}, baseEnv(), null);
+            out = out.trim();
+            logconsole(out.isEmpty() ? "(bash ничего не вывел)" : out);
             if (!out.contains("bash-ok")) throw new RuntimeException("bash не запустился: " + out);
 
             new File(filesDir, ".setup_done").createNewFile();
@@ -259,26 +264,38 @@ public class MainActivity extends Activity {
     private byte[] symlinksCache;
 
     // ---------- symlinks ----------
+    // Формат строки SYMLINKS.txt:  СОДЕРЖИМОЕ←ГДЕ_СОЗДАТЬ
+    //   parts[1] = путь ссылки ОТНОСИТЕЛЬНО usr/ (напр. ./lib/libevent.so)
+    //   parts[0] = содержимое ссылки: относительное к папке ссылки
+    //              ИЛИ абсолютное с префиксом /data/data/com.termux/files/usr
     private void applySymlinks() throws Exception {
         if (symlinksCache == null) return;
         String txt = new String(symlinksCache, "UTF-8");
         String[] lines = txt.split("\n");
-        int ok = 0;
+        int ok = 0, skip = 0;
         for (String line : lines) {
+            line = line.trim();
             if (!line.contains("←")) continue;
             String[] parts = line.split("←");
-            String target = parts[0];
-            String src = parts[1];
-            target = target.replace(TERMUX_USR, usr.getAbsolutePath());
+            if (parts.length != 2) { skip++; continue; }
+            String content = parts[0].trim();
+            String linkRel = parts[1].trim();
+            if (content.startsWith(TERMUX_USR))
+                content = usr.getAbsolutePath() + content.substring(TERMUX_USR.length());
             try {
-                new File(target).getParentFile().mkdirs();
-                Os.symlink(src, target);
+                File link = new File(usr, linkRel);
+                File parent = link.getParentFile();
+                if (parent != null) parent.mkdirs();
+                link.delete(); // идемпотентно: retry / повторная установка
+                Os.symlink(content, link.getAbsolutePath());
                 ok++;
             } catch (Throwable t) {
-                logconsole("symlink skip: " + target);
+                skip++;
+                if (skip <= 5) logconsole("symlink skip: " + linkRel + " (" + t + ")");
             }
         }
-        logconsole("создано ссылок: " + ok);
+        logconsole("создано ссылок: " + ok + (skip > 0 ? ", пропущено: " + skip : ""));
+        if (ok < 1000) throw new RuntimeException("слишком мало симлинков (" + ok + ") — проверь парсер");
     }
 
     // ---------- chmod ----------

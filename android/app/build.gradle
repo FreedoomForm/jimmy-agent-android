@@ -10,9 +10,12 @@ android {
     defaultConfig {
         applicationId "com.jimmy.agent"
         minSdk 24
-        targetSdk 34
-        versionCode 1
-        versionName "0.1"
+        // ВАЖНО: targetSdk >= 29 включает SELinux-запрет на exec() программ
+        // из приватной папки приложения (error=13 Permission denied).
+        // Termux держит targetSdk 28 по той же причине — мы тоже.
+        targetSdk 28
+        versionCode 3
+        versionName "0.2.1"
 
         python {
             version "3.12"
