@@ -40,7 +40,9 @@ jobs:
           A=android/app/src/main/assets
           mkdir -p "$A"
           curl -sL "$BOOTSTRAP_URL" -o "$A/bootstrap-aarch64.zip"
-          curl -sL "$CODEX_URL" -o "$A/codex-aarch64-musl.tar.gz"
+          # ВАЖНО: суффикс .gz нельзя — AAPT сам разжимает и переименовывает ассет.
+          # Храним как бинарный blob, gzip снимает Java (GZIPInputStream).
+          curl -sL "$CODEX_URL" -o "$A/codex-musl.bin"
           ls -la "$A"
 
       - name: Android SDK — лицензии

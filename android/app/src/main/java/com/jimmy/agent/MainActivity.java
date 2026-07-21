@@ -181,7 +181,7 @@ public class MainActivity extends Activity {
             logconsole("chmod ✔");
 
             status("распаковываю Codex CLI…");
-            untarGzAsset("codex-aarch64-musl.tar.gz", new File(filesDir, "codex"));
+            untarGzAsset("codex-musl.bin", new File(filesDir, "codex"));
             File rawCodex = new File(filesDir, "codex/codex-aarch64-unknown-linux-musl");
             if (rawCodex.exists() && !rawCodex.equals(codexBin)) rawCodex.renameTo(codexBin);
             Os.chmod(codexBin.getAbsolutePath(), 0755);
