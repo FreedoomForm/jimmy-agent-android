@@ -4,8 +4,28 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  CODEX_URL: https://github.com/openai/codex/releases/download/rust-v0.69.0/codex-aarch64-unknown-linux-musl.tar.gz
+  BOOTSTRAP_URL: https://github.com/termux/termux-packages/releases/download/bootstrap-2026.07.19-r1%2Bapt.android-7/bootstrap-aarch64.zip
+
 jobs:
+  # --- smoke-тест: codex-musl static исполняется на ARM64 Linux ---
+  verify-codex-static:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: codex musl static → запуск
+        run: |
+          curl -sL "$CODEX_URL" -o /tmp/c.tgz
+          mkdir -p /tmp/c && tar xzf /tmp/c.tgz -C /tmp/c
+          BIN=/tmp/c/codex-aarch64-unknown-linux-musl
+          file "$BIN"
+          chmod +x "$BIN"
+          "$BIN" --version
+          echo '{"name":"chatjimmy"}' > /dev/null
+          echo "STATIC BINARY RUNS ✔"
+
   build:
+    needs: verify-codex-static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +34,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+
+      - name: Скачать Termux bootstrap + codex static в assets
+        run: |
+          A=android/app/src/main/assets
+          mkdir -p "$A"
+          curl -sL "$BOOTSTRAP_URL" -o "$A/bootstrap-aarch64.zip"
+          curl -sL "$CODEX_URL" -o "$A/codex-aarch64-musl.tar.gz"
+          ls -la "$A"
 
       - name: Android SDK — лицензии
         run: |
@@ -28,7 +56,6 @@ jobs:
         run: |
           curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /opt
-          /opt/gradle-8.5/bin/gradle --version
 
       - name: Сборка debug APK
         run: /opt/gradle-8.5/bin/gradle --no-daemon -p android assembleDebug --stacktrace
@@ -36,5 +63,5 @@ jobs:
       - name: Артефакт APK
         uses: actions/upload-artifact@v4
         with:
-          name: JimmyAgent-debug-apk
+          name: JimmyAgent-termux-codex-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
