@@ -11,6 +11,7 @@ Logs are written to proxy.log (full request/response details).
 """
 
 import json
+import os
 import time
 import uuid
 import argparse
@@ -22,6 +23,21 @@ import re
 
 UPSTREAM_URL = "https://chatjimmy.ai/api/chat"
 DEFAULT_MODEL = "llama3.1-8B"
+
+# Папка files приложения (передаёт android_main); нужна санитайзеру
+# tool-аргументов, чтобы предсоздавать workdir рядом с рабочей папкой codex.
+FILES_DIR = None
+
+
+def set_files_dir(path):
+    global FILES_DIR
+    FILES_DIR = path
+
+
+def _workspace_dir():
+    if FILES_DIR:
+        return os.path.join(FILES_DIR, "home", "jimmy")
+    return os.environ.get("JIMMY_WORKSPACE", os.getcwd())
 FILTERED_TOOLS = {"webfetch", "todowrite", "skill", "question", "task"}
 MODELS = {
     "llama3.1-8B": "llama3.1-8B",
@@ -181,40 +197,155 @@ def _normalize_tool_args(name, raw_args, schema):
         try:
             raw_args = json.loads(raw_args)
         except json.JSONDecodeError:
-            raw_args = {}
+            # 8B-модель иногда шлёт arguments просто строкой-командой —
+            # для shell это явно сама команда, а не мусор
+            raw_args = {"command": raw_args} if name == "shell" else {}
     if not isinstance(raw_args, dict):
         raw_args = {}
 
     props = schema.get("properties", {}) if isinstance(schema, dict) else {}
     required = schema.get("required", []) if isinstance(schema, dict) else []
 
+    # заполняем отсутствующие обязательные ключи дефолтами
     for key in required:
         if key not in raw_args or raw_args[key] is None:
             pinfo = props.get(key, {})
             raw_args[key] = _default_for_type(pinfo.get("type", "string"))
-        else:
-            pinfo = props.get(key, {})
-            ptype = pinfo.get("type", "string")
-            if ptype == "string" and not isinstance(raw_args[key], str):
-                raw_args[key] = str(raw_args[key])
-            elif ptype == "integer" and not isinstance(raw_args[key], int):
-                try:
-                    raw_args[key] = int(raw_args[key])
-                except (ValueError, TypeError):
-                    raw_args[key] = 0
-            elif ptype == "number" and not isinstance(raw_args[key], (int, float)):
-                try:
-                    raw_args[key] = float(raw_args[key])
-                except (ValueError, TypeError):
-                    raw_args[key] = 0
-            elif ptype == "boolean" and not isinstance(raw_args[key], bool):
-                raw_args[key] = bool(raw_args[key])
-            elif ptype == "array" and not isinstance(raw_args[key], list):
-                raw_args[key] = [raw_args[key]]
-            elif ptype == "object" and not isinstance(raw_args[key], dict):
-                raw_args[key] = {}
 
-    return raw_args
+    # приводим типы ВСЕХ присутствующих ключей по схеме; битые опциональные
+    # ключи (например timeout_ms:"0" или пустые строки) удаляем — иначе codex
+    # отклоняет весь вызов с "failed to parse function arguments"
+    for key in list(raw_args.keys()):
+        is_req = key in required
+        val = raw_args[key]
+        if not is_req and (val is None or (isinstance(val, str) and val == "")):
+            raw_args.pop(key, None)
+            continue
+        pinfo = props.get(key, {})
+        ptype = pinfo.get("type", "string")
+        if ptype == "string" and not isinstance(val, str):
+            raw_args[key] = str(val)
+        elif ptype == "integer" and not isinstance(val, int):
+            try:
+                raw_args[key] = int(val)
+            except (ValueError, TypeError):
+                if is_req:
+                    raw_args[key] = 0
+                else:
+                    raw_args.pop(key, None)
+        elif ptype == "number" and not isinstance(val, (int, float)):
+            try:
+                raw_args[key] = float(val)
+            except (ValueError, TypeError):
+                if is_req:
+                    raw_args[key] = 0
+                else:
+                    raw_args.pop(key, None)
+        elif ptype == "boolean" and not isinstance(val, bool):
+            if is_req:
+                raw_args[key] = bool(val)
+            else:
+                raw_args.pop(key, None)
+        elif ptype == "array" and not isinstance(val, list):
+            raw_args[key] = [val]
+        elif ptype == "object" and not isinstance(val, dict):
+            if is_req:
+                raw_args[key] = {}
+            else:
+                raw_args.pop(key, None)
+
+    return sanitize_tool_args(name, raw_args)
+
+
+def _looks_like_command_line(s):
+    """Строка похожа на целую командную строку, а не на один argv-токен."""
+    return any(ch in s for ch in (" ", "\n", "\t", ";", "|", "&", ">", "<", "\"", "'"))
+
+
+def sanitize_tool_args(name, args):
+    """
+    Защита от типичных ошибок 8B-модели в вызовах инструмента shell.
+
+    codex 0.69 спавнит argv[0] напрямую (execvp), БЕЗ обёртки шеллом, поэтому:
+    1) command-строка целиком ("touch index.html") или argv из одного элемента
+       с пробелами → execvp ищет файл с пробелом в имени → Io(NotFound) на
+       КАЖДОЙ команде. Оборачиваем такое в ["bash", "-lc", "<строка>"].
+    2) workdir, указывающий в несуществующий каталог → spawn падает тем же
+       Io(NotFound) (std::process::Command::current_dir). Предсоздаём каталог;
+       если не вышло — выкидываем ключ (codex возьмёт session cwd = ~/jimmy).
+    """
+    if name != "shell" or not isinstance(args, dict):
+        return args
+
+    # Модель любит подставлять "danger-full-access" и прочий мусор —
+    # codex 0.69 принимает только use_default/require_escalated, иначе
+    # весь вызов отклоняется ("failed to parse function arguments").
+    # Политика у нас и так danger-full-access → ключ просто удаляем.
+    sp = args.get("sandbox_permissions")
+    if sp is not None and sp not in ("use_default", "require_escalated"):
+        args.pop("sandbox_permissions", None)
+        logfile(f"sanitize: sandbox_permissions '{sp}' удалён")
+
+    cmd = args.get("command")
+    if isinstance(cmd, str):
+        if _looks_like_command_line(cmd):
+            args["command"] = ["bash", "-lc", cmd]
+            logfile(f"sanitize: shell command-string → bash -lc")
+        else:
+            args["command"] = [cmd]
+    elif isinstance(cmd, list):
+        flat = [c for c in cmd if isinstance(c, str)]
+        if len(flat) == 1 and _looks_like_command_line(flat[0]):
+            args["command"] = ["bash", "-lc", flat[0]]
+            logfile(f"sanitize: shell 1-element argv blob → bash -lc")
+        elif (
+            len(flat) > 3
+            and flat[0] in ("bash", "sh")
+            and flat[1] in ("-lc", "-c")
+        ):
+            # модель разорвала строку скрипта на несколько argv-элементов —
+            # склеиваем обратно, иначе лишние элементы станут $0, $1…
+            args["command"] = [flat[0], flat[1], " ".join(flat[2:])]
+            logfile(f"sanitize: shell {len(flat)}-elem bash argv → склеено в один скрипт")
+        elif len(flat) >= 2 and all(
+            _looks_like_command_line(c) for c in flat
+        ) and flat[0] not in ("bash", "sh"):
+            # каждый элемент — целая команда (напр. ["mkdir -p a", "echo hi > f"]) —
+            # execvp такое не выполнит → склеиваем в один скрипт построчно
+            args["command"] = ["bash", "-lc", "\n".join(flat)]
+            logfile(f"sanitize: shell argv из {len(flat)} команд → bash -lc скрипт")
+
+    wd = args.get("workdir")
+    if isinstance(wd, str) and wd.strip():
+        wd = wd.strip()
+        if wd.startswith("~"):
+            # ~ → home окружения (files/home); codex сам тильду не раскрывает
+            wd = os.path.join(os.path.dirname(_workspace_dir()), wd[1:].lstrip("/"))
+        path = wd if os.path.isabs(wd) else os.path.join(_workspace_dir(), wd)
+        try:
+            os.makedirs(path, exist_ok=True)
+            args["workdir"] = path  # абсолютный путь надёжнее: codex резолвит от session cwd
+            logfile(f"sanitize: workdir ensured → {path}")
+        except OSError as e:
+            args.pop("workdir", None)
+            logfile(f"sanitize: workdir '{wd}' недоступен ({e}), ключ удалён")
+    else:
+        # workdir = null / пустой / не строка — убираем, чтобы codex не споткнулся
+        args.pop("workdir", None)
+
+    return args
+
+
+# модель путает закрывающий тег: </tool_result> ИЛИ </tool_call>
+_FAKE_RESULT_RX = re.compile(r"<tool_result>.*?</tool_(?:result|call)>\s*", re.DOTALL)
+
+
+def strip_fake_tool_results(text):
+    """8B-модель любит галлюцинировать <tool_result> в своих ответах — вырезаем,
+    чтобы не засорять контекст (настоящие результаты приходят role=tool)."""
+    if not isinstance(text, str) or "<tool_result>" not in text:
+        return text
+    return _FAKE_RESULT_RX.sub("", text).strip()
 
 
 def _extract_call_objects(obj):
@@ -227,6 +358,46 @@ def _extract_call_objects(obj):
     return []
 
 
+def _try_loads_lenient(raw):
+    """json.loads + починка типичного обрыва генерации: недостающие
+    закрывающие ]/} в конце строки дозакрываем (вне кавычек)."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    s = raw.rstrip()
+    stack = []
+    instr = False
+    esc = False
+    for ch in s:
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+        else:
+            if ch == '"':
+                instr = True
+            elif ch in "[{":
+                stack.append(ch)
+            elif ch in "]}":
+                if stack and (
+                    (stack[-1] == "[" and ch == "]") or (stack[-1] == "{" and ch == "}")
+                ):
+                    stack.pop()
+    if instr:
+        return None  # оборвано посреди строки — не чиним
+    closers = "".join("]" if c == "[" else "}" for c in reversed(stack))
+    if not closers:
+        return None
+    try:
+        return json.loads(s + closers)
+    except json.JSONDecodeError:
+        return None
+
+
 def parse_tool_calls(content, tools=None):
     """
     Parse <tool_call>…</tool_call> blocks from the model's text.
@@ -237,13 +408,25 @@ def parse_tool_calls(content, tools=None):
     matches = pattern.findall(content)
 
     if not matches:
+        # 8B-модель нередко пишет вызов инструмента голым JSON без тегов —
+        # пробуем восстановить вызов из всего текста целиком…
+        recovered = _recover_untagged_call(content, tools)
+        if recovered is None:
+            # …либо JSON «утоплен» в поясняющем тексте — вытаскиваем его.
+            recovered = _recover_embedded_call(content, tools)
+        if recovered is not None:
+            logfile(f"recovered untagged tool call: {recovered[1]['function']['name']}")
+            return recovered[0], [recovered[1]]
         return content, []
 
     tool_calls = []
     schema_index = _tool_schema_index(tools)
     for raw in matches:
         try:
-            call = json.loads(raw.strip())
+            # модель часто обрывает JSON в конце — чиним недостающие ]/}
+            call = _try_loads_lenient(raw.strip())
+            if call is None:
+                raise json.JSONDecodeError("unrepairable", raw, 0)
             for item in _extract_call_objects(call):
                 if not isinstance(item, dict):
                     continue
@@ -282,6 +465,128 @@ def parse_tool_calls(content, tools=None):
 
     text = pattern.sub("", content).strip()
     return text, tool_calls
+
+
+def _recover_untagged_call(content, tools):
+    """
+    Модель вывела JSON вызова инструмента без <tool_call>-тегов.
+    Поддерживаемые формы:
+      {"name": "shell", "arguments": {...}}
+      {"command": [...]}            # без имени → угадываем по required-ключам
+      обёрнуто в ```json fenced-блок
+    Возвращает (очищенный_текст, tool_call_dict) или None.
+    """
+    if not tools:
+        return None
+    t = content.strip()
+    m = re.match(r"^```(?:json)?\s*(\{.*\})\s*```$", t, re.DOTALL)
+    if m:
+        t = m.group(1).strip()
+    if not t.startswith("{") or not t.endswith("}"):
+        return None
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    call = _call_from_dict(obj, _tool_schema_index(tools))
+    if call is None:
+        return None
+    return "", call
+
+
+def _call_from_dict(obj, schema_index):
+    """Собрать OpenAI tool_call из распарсенного словаря (или None)."""
+    name = (
+        obj.get("name")
+        or obj.get("tool")
+        or obj.get("tool_name")
+        or (obj.get("function") or {}).get("name")
+    )
+    if name and name not in schema_index:
+        return None
+
+    args = (
+        obj.get("arguments")
+        or obj.get("parameters")
+        or obj.get("args")
+        or obj.get("tool_input")
+        or obj.get("input")
+    )
+
+    if not name:
+        # угадываем инструмент по обязательным ключам схемы (shell → command)
+        for tname, schema in schema_index.items():
+            req = schema.get("required", []) if isinstance(schema, dict) else []
+            if req and all(k in obj for k in req):
+                name = tname
+                args = obj
+                break
+        if not name:
+            return None
+    if args is None:
+        args = {
+            k: v
+            for k, v in obj.items()
+            if k not in ("name", "tool", "tool_name", "function")
+        }
+
+    arguments = _normalize_tool_args(name, args, schema_index.get(name, {}))
+    return {
+        "id": f"call_{uuid.uuid4().hex[:8]}",
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+def _recover_embedded_call(content, tools):
+    """
+    JSON вызова «утоплен» в обычном тексте («Упрощённая команда: {...}»).
+    Ищем сбалансированные {…}-фрагменты и пробуем каждый как вызов.
+    """
+    if not tools:
+        return None
+    schema_index = _tool_schema_index(tools)
+    i = content.find("{")
+    tried = 0
+    while i != -1 and tried < 6:
+        depth = 0
+        j = i
+        instr = False
+        esc = False
+        while j < len(content) and (j - i) < 3000:
+            ch = content[j]
+            if instr:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    instr = False
+            else:
+                if ch == '"':
+                    instr = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            j += 1
+        if depth == 0:
+            try:
+                obj = json.loads(content[i : j + 1])
+            except json.JSONDecodeError:
+                obj = None
+            if isinstance(obj, dict):
+                call = _call_from_dict(obj, schema_index)
+                if call is not None:
+                    rest = (content[:i] + content[j + 1 :]).strip()
+                    return rest, call
+            tried += 1
+        i = content.find("{", i + 1)
+    return None
 
 
 def extract_text_content(content):
@@ -437,6 +742,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         for msg in messages:
             role = msg.get("role", "user")
             content = extract_text_content(msg.get("content"))
+            if role != "tool":
+                # галлюцинированные моделью <tool_result> в прошлых ответах
+                # провоцируют её продолжать подделывать результаты — вырезаем
+                content = strip_fake_tool_results(content)
 
             if role == "system":
                 system_prompt += content + "\n"
@@ -552,6 +861,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         content = re.sub(
             r"<\|stats\|>.*?<\|/stats\|>", "", raw_response, flags=re.DOTALL
         ).strip()
+        # Вырезаем поддельные <tool_result>, которые модель нафантазировала
+        # (реальные результаты придут следующим ходом от codex как role=tool).
+        content = strip_fake_tool_results(content)
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         stats_match = re.search(
             r"<\|stats\|>(.*?)<\|/stats\|>", raw_response, re.DOTALL

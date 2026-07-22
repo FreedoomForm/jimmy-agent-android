@@ -67,7 +67,7 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.5";
+    private static final String VERSION = "0.5.1";
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -504,6 +504,10 @@ public class MainActivity extends Activity {
         env.put("TMPDIR", usr.getAbsolutePath() + "/tmp");
         env.put("PATH", usr.getAbsolutePath() + "/bin:" + usr.getAbsolutePath()
                 + "/bin/applets:/system/bin:/system/xbin");
+        // codex выбирает шелл: $SHELL → кандидаты в PATH → хардкод /bin/bash.
+        // На Android без SHELL он падает в fallback на несуществующие пути,
+        // и КАЖДАЯ команда умирает с Io(NotFound). Указываем наш bash явно.
+        env.put("SHELL", usr.getAbsolutePath() + "/bin/bash");
         env.put("LD_LIBRARY_PATH", usr.getAbsolutePath() + "/lib");
         env.put("LANG", "C.UTF-8");
         env.put("CHATJIMMY_API_KEY", "dummy");

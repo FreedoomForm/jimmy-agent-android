@@ -20,6 +20,7 @@ cd /root
 
 # 3. Codex
 export CHATJIMMY_API_KEY=dummy
+export SHELL="${SHELL:-/bin/bash}"
 echo "🧠 Codex CLI (model: llama3.1-8B via ChatJimmy, ~17K tok/s)"
 echo "   совет: короткие конкретные задачи работают лучше всего"
 exec codex

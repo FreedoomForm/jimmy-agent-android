@@ -14,6 +14,7 @@ def main(files_dir):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import proxy as P
 
+    P.set_files_dir(files_dir)  # санитайзер workdir в proxy.py работает от files/
     P.setup_logging(os.path.join(files_dir, "proxy.log"), enable_log=False)
     srv = HTTPServer(("127.0.0.1", 4100), P.ProxyHandler)
     threading.Thread(target=srv.serve_forever, daemon=True, name="jimmy-proxy").start()
