@@ -2,6 +2,8 @@
 model = "llama3.1-8B"
 model_provider = "chatjimmy"
 approval_policy = "never"
+# seccomp-песочница codex (workspace-write) несовместима с Android-ядром → SIGSYS.
+sandbox_mode = "danger-full-access"
 # Заменяем стоковые базовые инструкции codex (24К символов по-английски)
 # на наш компактный русский SYSTEM.md из рабочей папки — модель слушается
 # лучше, а контекст экономится в 6 раз.
