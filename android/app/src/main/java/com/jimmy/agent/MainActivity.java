@@ -38,6 +38,7 @@ import android.widget.Toast;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -66,7 +67,7 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.4.2";
+    private static final String VERSION = "0.5";
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -559,10 +560,13 @@ public class MainActivity extends Activity {
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = tv("⚡ JimmyAgent", 17, TXT, true);
         titles.addView(title);
-        TextView sub = tv("codex · chatjimmy · llama3.1-8B", 11, DIM2, false);
-        titles.addView(sub);
+        modeSub = tv("💬 чат · chatjimmy", 11, DIM2, false);
+        titles.addView(modeSub);
         head.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        modeBtn = hdrBtn("💬");
+        modeBtn.setOnClickListener(v -> toggleMode());
+        head.addView(modeBtn);
         TextView promptBtn = hdrBtn("⚙");
         promptBtn.setOnClickListener(v -> showPromptEditor());
         head.addView(promptBtn);
@@ -632,7 +636,8 @@ public class MainActivity extends Activity {
         setContentView(chatRoot);
         showingFiles = false;
         if (msgs.isEmpty())
-            addNote("чат подключён к Codex CLI (ChatJimmy, llama3.1-8B, ~17K tok/s). Всё локально.");
+            addNote("💬 режим чата — чистый разговор без codex-промпта (переключатель 💬/🛠 в шапке). "
+                    + "ChatJimmy, llama3.1-8B, ~17K tok/s, всё локально.");
     }
 
     private void setSendIdle() {
@@ -661,13 +666,26 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
     }
 
+    private void toggleMode() {
+        if (agentBusy) stopAgent();
+        chatMode = !chatMode;
+        modeBtn.setText(chatMode ? "💬" : "🛠");
+        modeSub.setText(chatMode ? "💬 чат · chatjimmy" : "🛠 агент · codex · chatjimmy");
+        addNote(chatMode
+                ? "💬 режим чата: чистый разговор напрямую с моделью — без codex-инструкций и инструментов. Системный промпт — только твой (⚙)."
+                : "🛠 режим агента: codex с инструментами — пишет файлы, запускает команды в песочнице.");
+    }
+
     private void newChat() {
         if (agentBusy) stopAgent();
         msgs.clear();
         hasSession = false;
+        chatHistory.clear();
         stopRequested = false;
         adapter.notifyDataSetChanged();
-        addNote("✎ новый диалог. файлы в песочнице остались на месте.");
+        addNote("✎ новый диалог. " + (chatMode
+                ? "история чата очищена."
+                : "файлы в песочнице остались на месте."));
     }
 
     private void onSend() {
@@ -701,7 +719,11 @@ public class MainActivity extends Activity {
         stopRequested = false;
         setSendBusy();
         adapter.notifyDataSetChanged();
-        new Thread(() -> runCodex(prompt, live), "codex-run").start();
+        if (chatMode) {
+            new Thread(() -> runChatJimmy(prompt, live), "chat-run").start();
+        } else {
+            new Thread(() -> runCodex(prompt, live), "codex-run").start();
+        }
     }
 
     private void stopAgent() {
@@ -710,6 +732,148 @@ public class MainActivity extends Activity {
         if (p != null) {
             try { p.destroy(); } catch (Throwable ignore) { }
         }
+        java.net.HttpURLConnection c = currentConn;
+        if (c != null) {
+            try { c.disconnect(); } catch (Throwable ignore) { }
+        }
+    }
+
+    // =====================================================================
+    // 💬 РЕЖИМ ЧАТА: напрямую с ChatJimmy через прокси — БЕЗ промпта codex
+    //    системный промпт = только пользовательский ~/jimmy/AGENTS.md
+    // =====================================================================
+    private void trimChatHistory() {
+        while (chatHistory.size() > 20) chatHistory.remove(0);
+    }
+
+    private void runChatJimmy(String userMsg, Msg live) {
+        // последний ход пользователя если ещё не добавлен — добавим
+        chatHistory.add(new String[]{"user", userMsg});
+        trimChatHistory();
+
+        boolean answered = false;
+        String err = null;
+        final StringBuilder diag = new StringBuilder();
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS && !answered && !stopRequested; attempt++) {
+            final StringBuilder acc = new StringBuilder();
+            ui.post(() -> {
+                live.text = "";
+                adapter.notifyDataSetChanged();
+            });
+            appendLive(live, acc, T_OPEN + "💭 думаю…\n" + T_CLOSE);
+            String reply = null;
+            try {
+                if (attempt > 1) Thread.sleep(700);
+                ensureProxyUp();
+                reply = chatCompletion(diag);
+            } catch (Throwable t) {
+                err = String.valueOf(t);
+                if (diag.length() < 400)
+                    diag.append("исключение: ").append(err.length() > 160 ? err.substring(0, 160) : err).append('\n');
+            }
+            if (reply != null && !reply.trim().isEmpty()) {
+                answered = true;
+                final StringBuilder acc2 = new StringBuilder();
+                ui.post(() -> {
+                    live.text = "";
+                    adapter.notifyDataSetChanged();
+                });
+                renderAgentText(reply, live, acc2);
+                chatHistory.add(new String[]{"assistant", reply});
+                trimChatHistory();
+            }
+        }
+        agentBusy = false;
+        currentConn = null;
+        ui.post(() -> {
+            setSendIdle();
+            adapter.notifyDataSetChanged();
+        });
+        if (stopRequested) {
+            ui.post(() -> {
+                live.text = stripMarkers(live.text) + "\n⏹ остановлено";
+                adapter.notifyDataSetChanged();
+            });
+            // отменённый ход пользователя из истории убираем — чтоб redo не дублировал
+            if (!chatHistory.isEmpty()) chatHistory.remove(chatHistory.size() - 1);
+        } else if (!answered) {
+            // пусто — убираем неотвеченный ход пользователя из истории
+            if (!chatHistory.isEmpty()) chatHistory.remove(chatHistory.size() - 1);
+            String base = err != null
+                    ? "💥 ошибка: " + err
+                    : "(модель не ответила за " + MAX_ATTEMPTS
+                    + " попытки — переформулируй или жми ↻ ещё раз)";
+            String d = diag.toString().trim();
+            final String msg = d.isEmpty() ? base
+                    : base + "\n\n🔍 детали (пришли скриншотом):\n" + d;
+            ui.post(() -> {
+                live.text = msg;
+                adapter.notifyDataSetChanged();
+            });
+        }
+    }
+
+    // один запрос к прокси; вернёт текст ответа или null (детали → diag)
+    private String chatCompletion(StringBuilder diag) throws Exception {
+        String system;
+        File af = new File(jimmyDir, "AGENTS.md");
+        system = af.exists() ? readFileText(af) : null;
+        if (system == null || system.startsWith("(")) system = readAssetText("jimmy/AGENTS.md");
+
+        JSONObject req = new JSONObject();
+        req.put("model", "llama3.1-8B");
+        req.put("stream", false);
+        JSONArray arr = new JSONArray();
+        JSONObject sys = new JSONObject();
+        sys.put("role", "system");
+        sys.put("content", system);
+        arr.put(sys);
+        synchronized (chatHistory) {
+            for (String[] h : chatHistory) {
+                JSONObject m = new JSONObject();
+                m.put("role", h[0]);
+                m.put("content", h[1]);
+                arr.put(m);
+            }
+        }
+        req.put("messages", arr);
+
+        byte[] body = req.toString().getBytes("UTF-8");
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                new java.net.URL("http://127.0.0.1:4100/v1/chat/completions").openConnection();
+        currentConn = c;
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(120000);
+        c.setRequestMethod("POST");
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setDoOutput(true);
+        c.getOutputStream().write(body);
+        int code = c.getResponseCode();
+        InputStream is = (code == 200) ? c.getInputStream() : c.getErrorStream();
+        BufferedReader rd = new BufferedReader(new InputStreamReader(
+                is == null ? new java.io.ByteArrayInputStream(new byte[0]) : is));
+        StringBuilder sb = new StringBuilder();
+        String ln;
+        while ((ln = rd.readLine()) != null) sb.append(ln);
+        if (code != 200) {
+            String b = sb.toString();
+            if (diag.length() < 500)
+                diag.append("HTTP ").append(code).append(": ")
+                        .append(b.length() > 160 ? b.substring(0, 160) : b).append('\n');
+            return null;
+        }
+        JSONObject resp = new JSONObject(sb.toString());
+        JSONArray choices = resp.optJSONArray("choices");
+        if (choices == null || choices.length() == 0) {
+            diag.append("пустые choices\n");
+            return null;
+        }
+        JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
+        if (msg == null) {
+            diag.append("нет message\n");
+            return null;
+        }
+        return msg.optString("content", "");
     }
 
     // =====================================================================
