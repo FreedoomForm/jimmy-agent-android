@@ -11,6 +11,7 @@ Logs are written to proxy.log (full request/response details).
 """
 
 import json
+import html
 import os
 import time
 import uuid
@@ -287,6 +288,18 @@ def sanitize_tool_args(name, args):
         logfile(f"sanitize: sandbox_permissions '{sp}' удалён")
 
     cmd = args.get("command")
+    # 8B часто HTML-эскейпит текст после знакомства с <tool_call>-форматом:
+    # "mkdir -p x &amp;&amp; cd x", "&lt;h1&gt;" — возвращаем в норму.
+    if isinstance(cmd, str):
+        cmd = html.unescape(cmd)
+        args["command"] = cmd
+    elif isinstance(cmd, list):
+        args["command"] = cmd = [
+            html.unescape(c) if isinstance(c, str) else c for c in cmd
+        ]
+    if isinstance(args.get("workdir"), str):
+        args["workdir"] = html.unescape(args["workdir"])
+
     if isinstance(cmd, str):
         if _looks_like_command_line(cmd):
             args["command"] = ["bash", "-lc", cmd]
@@ -336,8 +349,7 @@ def sanitize_tool_args(name, args):
     return args
 
 
-# модель путает закрывающий тег: </tool_result> ИЛИ </tool_call>
-_FAKE_RESULT_RX = re.compile(r"<tool_result>.*?</tool_(?:result|call)>\s*", re.DOTALL)
+_FAKE_RESULT_RX = re.compile(r"<tool_result>.*?</tool_result>\s*", re.DOTALL)
 
 
 def strip_fake_tool_results(text):
@@ -356,46 +368,6 @@ def _extract_call_objects(obj):
             return obj.get("tool_calls")
         return [obj]
     return []
-
-
-def _try_loads_lenient(raw):
-    """json.loads + починка типичного обрыва генерации: недостающие
-    закрывающие ]/} в конце строки дозакрываем (вне кавычек)."""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    s = raw.rstrip()
-    stack = []
-    instr = False
-    esc = False
-    for ch in s:
-        if instr:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                instr = False
-        else:
-            if ch == '"':
-                instr = True
-            elif ch in "[{":
-                stack.append(ch)
-            elif ch in "]}":
-                if stack and (
-                    (stack[-1] == "[" and ch == "]") or (stack[-1] == "{" and ch == "}")
-                ):
-                    stack.pop()
-    if instr:
-        return None  # оборвано посреди строки — не чиним
-    closers = "".join("]" if c == "[" else "}" for c in reversed(stack))
-    if not closers:
-        return None
-    try:
-        return json.loads(s + closers)
-    except json.JSONDecodeError:
-        return None
 
 
 def parse_tool_calls(content, tools=None):
@@ -417,16 +389,17 @@ def parse_tool_calls(content, tools=None):
         if recovered is not None:
             logfile(f"recovered untagged tool call: {recovered[1]['function']['name']}")
             return recovered[0], [recovered[1]]
-        return content, []
+        # вызов не распарсился даже с починкой — прячем обрывок <tool_call>…,
+        # чтобы не мусорить ни ответ пользователю, ни будущий контекст
+        cleaned = re.sub(r"<tool_call>.*?</tool_call>\s*", "", content, flags=re.DOTALL)
+        cleaned = re.sub(r"<tool_call>.*$", "", cleaned, flags=re.DOTALL).strip()
+        return cleaned, []
 
     tool_calls = []
     schema_index = _tool_schema_index(tools)
     for raw in matches:
         try:
-            # модель часто обрывает JSON в конце — чиним недостающие ]/}
-            call = _try_loads_lenient(raw.strip())
-            if call is None:
-                raise json.JSONDecodeError("unrepairable", raw, 0)
+            call = json.loads(raw.strip())
             for item in _extract_call_objects(call):
                 if not isinstance(item, dict):
                     continue

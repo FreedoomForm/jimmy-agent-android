@@ -20,3 +20,9 @@ name = "ChatJimmy via jimmy-proxy (Taalas ASIC, ~17K tok/s)"
 base_url = "http://127.0.0.1:4100/v1"
 env_key = "CHATJIMMY_API_KEY"
 wire_api = "chat"
+
+# Дочернем процессы инструментов запускаются с ЧИСТЫМ окружением; по умолчанию
+# codex оставляет только «core»-набор (PATH есть, LD_LIBRARY_PATH — нет),
+# из-за чего Termux-бинари не линкуются (libandroid-support.so not found).
+[shell_environment_policy]
+inherit = "all"

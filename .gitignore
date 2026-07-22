@@ -1,2 +1,3 @@
 android/app/src/main/assets/bootstrap-aarch64.zip
 android/app/src/main/assets/codex-musl.bin
+__pycache__/
