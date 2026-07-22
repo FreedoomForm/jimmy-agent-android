@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.4";
+    private static final String VERSION = "0.4.1";
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -243,8 +243,9 @@ public class MainActivity extends Activity {
             new File(home, ".codex").mkdirs();
             copyAsset("jimmy/AGENTS.md", new File(jimmyDir, "AGENTS.md"));
             copyAsset("jimmy/AGENTS.md", new File(jimmyDir, ".AGENTS.md.default"));
+            copyAsset("jimmy/SYSTEM.md", new File(jimmyDir, "SYSTEM.md"));
             copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
-            logconsole("AGENTS.md + config.toml ✔");
+            logconsole("AGENTS.md + SYSTEM.md + config.toml ✔");
             refreshAssetsIfNeeded(); // отметить версию ассетов
 
             status("проверяю bash…");
@@ -311,6 +312,7 @@ public class MainActivity extends Activity {
                     copyAsset("jimmy/AGENTS.md", agents);
                     copyAsset("jimmy/AGENTS.md", shadow);
                 } // пользовательский промпт — святыня, не трогаем
+                copyAsset("jimmy/SYSTEM.md", new File(jimmyDir, "SYSTEM.md"));
                 copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
                 FileOutputStream fos = new FileOutputStream(marker);
                 fos.write((VERSION + "\n").getBytes("UTF-8"));
@@ -716,6 +718,7 @@ public class MainActivity extends Activity {
     private void runCodex(String userMsg, Msg live) {
         boolean answered = false;
         String err = null;
+        final StringBuilder diag = new StringBuilder();
         for (int attempt = 1; attempt <= MAX_ATTEMPTS && !answered && !stopRequested; attempt++) {
             // каждая попытка рисует пузырь заново — ретраи для юзера незаметны
             final StringBuilder acc = new StringBuilder();
@@ -733,9 +736,11 @@ public class MainActivity extends Activity {
             boolean[] gotThread = new boolean[1];
             try {
                 if (attempt > 1) Thread.sleep(700);
-                runCodexOnce(prompt, live, acc, agentText, gotThread);
+                ensureProxyUp();
+                runCodexOnce(prompt, live, acc, agentText, gotThread, diag);
             } catch (Throwable t) {
                 err = String.valueOf(t);
+                if (diag.length() < 400) diag.append("исключение: ").append(err.length() > 160 ? err.substring(0, 160) : err).append('\n');
             }
             if (gotThread[0]) hasSession = true;
             answered = agentText.toString().trim().length() > 0;
@@ -749,10 +754,13 @@ public class MainActivity extends Activity {
         if (stopRequested) {
             ui.post(() -> { live.text = stripMarkers(live.text) + "\n⏹ остановлено"; adapter.notifyDataSetChanged(); });
         } else if (!answered) {
-            final String msg = err != null
+            String base = err != null
                     ? "💥 ошибка: " + err
                     : "(модель не ответила за " + MAX_ATTEMPTS
                     + " попытки — переформулируй или жми ↻ ещё раз)";
+            String d = diag.toString().trim();
+            final String msg = d.isEmpty() ? base
+                    : base + "\n\n🔍 детали (пришли мне скриншотом):\n" + d;
             ui.post(() -> {
                 live.text = msg;
                 adapter.notifyDataSetChanged();
@@ -760,22 +768,61 @@ public class MainActivity extends Activity {
         }
     }
 
-    // один заход codex; agentOut накапливает текст ответа
+    // ---------- прокси: ждём поднятия, при падении перезапускаем ----------
+    private volatile boolean proxyStarting = false;
+
+    private boolean proxyUp() {
+        try {
+            java.net.Socket s = new java.net.Socket();
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", 4100), 600);
+            s.close();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    // вызывается из фонового потока перед запуском codex
+    private void ensureProxyUp() throws Exception {
+        long deadline = System.currentTimeMillis() + 12000;
+        while (System.currentTimeMillis() < deadline) {
+            if (proxyUp()) return;
+            startProxyOnce();       // второй python просто не забиндится и тихо умрёт
+            Thread.sleep(700);
+        }
+        throw new Exception("прокси 127.0.0.1:4100 не поднялся за 12 сек");
+    }
+
+    private void startProxyOnce() {
+        if (proxyStarting) return;
+        proxyStarting = true;
+        new Thread(() -> {
+            try {
+                startProxy();
+            } finally {
+                proxyStarting = false;
+            }
+        }, "proxy-starter").start();
+    }
+
+    // один заход codex; agentOut накапливает текст ответа, diag — диагностику сбоев
     private int runCodexOnce(String prompt, Msg live, StringBuilder acc,
-                             StringBuilder agentOut, boolean[] gotThread) {
+                             StringBuilder agentOut, boolean[] gotThread, StringBuilder diag) {
         int exit = -1;
         try {
             ArrayList<String> cmd = new ArrayList<>();
             cmd.add(codexBin.getAbsolutePath());
             cmd.add("exec");
-            if (hasSession) {
-                cmd.add("resume");
-                cmd.add("--last");
-            }
+            // ВАЖНО: флаги идут ДО "resume --last" — иначе clap отвергает --json
+            // ("unexpected argument") и ответ пустой. Так было сломано с v0.2.
             cmd.add("--json");
             cmd.add("--skip-git-repo-check");
             cmd.add("-s");
             cmd.add("workspace-write");
+            if (hasSession) {
+                cmd.add("resume");
+                cmd.add("--last");
+            }
             cmd.add(prompt);
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -804,16 +851,32 @@ public class MainActivity extends Activity {
 
             BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()));
             String line;
+            int rawLogged = 0, itemCount = 0;
             while ((line = r.readLine()) != null) {
                 lastEventAt = System.currentTimeMillis();
                 if (stopRequested) break;
                 line = line.trim();
-                if (line.isEmpty() || !line.startsWith("{")) continue;
+                if (line.isEmpty()) continue;
+                if (!line.startsWith("{")) {
+                    // не-JSON строки — обычно ошибки clap/рантайма: собираем в диагностику
+                    if (rawLogged < 2 && diag.length() < 500) {
+                        diag.append("codex: ").append(line.length() > 140 ? line.substring(0, 140) : line).append('\n');
+                        rawLogged++;
+                    }
+                    continue;
+                }
                 try {
                     JSONObject ev = new JSONObject(line);
                     String type = ev.optString("type", "");
                     if ("thread.started".equals(type)) { gotThread[0] = true; continue; }
+                    if ("error".equals(type)) {
+                        String em = ev.optString("message", "");
+                        if (!em.isEmpty() && diag.length() < 500)
+                            diag.append("codex error: ").append(em.length() > 160 ? em.substring(0, 160) : em).append('\n');
+                        continue;
+                    }
                     if (!"item.completed".equals(type)) continue;
+                    itemCount++;
                     JSONObject item = ev.optJSONObject("item");
                     if (item == null) continue;
                     String it = item.optString("type", "");
@@ -842,8 +905,11 @@ public class MainActivity extends Activity {
                 } catch (Throwable ignore) { }
             }
             exit = p.waitFor();
+            if (exit != 0 && diag.length() < 500) diag.append("codex exit=").append(exit).append('\n');
+            if (itemCount == 0 && exit == 0 && diag.length() < 500) diag.append("codex: 0 items, exit=0 (пустой ответ upstream)\n");
         } catch (Throwable t) {
             appendLive(live, acc, T_OPEN + "💥 ошибка запуска: " + t + T_CLOSE);
+            if (diag.length() < 500) diag.append("spawn: ").append(String.valueOf(t)).append('\n');
         } finally {
             currentProc = null;
         }
@@ -1271,7 +1337,8 @@ public class MainActivity extends Activity {
 
         TextView hint = tv("хранится в ~/jimmy/AGENTS.md — Codex читает его перед КАЖДЫМ "
                 + "запросом: изменения применяются со следующего сообщения. "
-                + "↺ — вернуть стандартный текст (ещё не сохраняет).", 11.5f, DIM2, false);
+                + "↺ — вернуть стандартный текст (ещё не сохраняет). "
+                + "Техническая часть промпта лежит отдельно в SYSTEM.md и обновляется с приложением.", 11.5f, DIM2, false);
         hint.setPadding(dp(14), dp(8), dp(14), dp(8));
         root.addView(hint);
 

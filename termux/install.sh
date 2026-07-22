@@ -20,7 +20,7 @@ BASE=https://raw.githubusercontent.com/FreedoomForm/jimmy-agent-android/main/ter
 
 echo "⬇️  [3/5] файлы агента…"
 mkdir -p "$UB/jimmy-codex"
-for f in proxy.py config.toml AGENTS.md run.sh; do
+for f in proxy.py config.toml AGENTS.md SYSTEM.md run.sh; do
   curl -sL "$BASE/$f" -o "$UB/jimmy-codex/$f"
 done
 chmod +x "$UB/jimmy-codex/run.sh"
@@ -40,4 +40,4 @@ echo "✅ [5/5] Готово! Управление:"
 echo "   Запуск агента:  proot-distro login ubuntu -- bash /root/jimmy-codex/run.sh"
 echo "   (прокси ChatJimmy поднимется сам на 127.0.0.1:4100, откроется Codex TUI)"
 echo ""
-echo "📁 Проект Codex: /root (AGENTS.md с grug-протоколом уже там)"
+echo "📁 Проект Codex: /root (AGENTS.md + SYSTEM.md уже там)"

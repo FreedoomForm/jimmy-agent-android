@@ -15,6 +15,7 @@ fi
 
 # 2. AGENTS.md с grug-протоколом — в корень проекта
 cp -f /root/jimmy-codex/AGENTS.md /root/AGENTS.md
+cp -f /root/jimmy-codex/SYSTEM.md /root/SYSTEM.md
 cd /root
 
 # 3. Codex
