@@ -83,6 +83,12 @@ public class MainActivity extends Activity {
     private volatile boolean stopRequested = false;
     private volatile long lastEventAt = 0;
     private Process currentProc = null;
+    private java.net.HttpURLConnection currentConn = null;
+
+    // ---------- режимы: 💬 чистый чат / 🛠 codex-агент ----------
+    private boolean chatMode = true;
+    private TextView modeBtn, modeSub;
+    private final ArrayList<String[]> chatHistory = new ArrayList<>();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     // ---------- загрузчик ----------
