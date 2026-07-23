@@ -346,7 +346,33 @@ def sanitize_tool_args(name, args):
         # workdir = null / пустой / не строка — убираем, чтобы codex не споткнулся
         args.pop("workdir", None)
 
+    # НЕЗАВИСИМЫЙ страховой контур: даже если shell_environment_policy по какой-то
+    # причине не применилась (например, старый config.toml на устройстве — уже
+    # прокусывало), гарантируем Termux-окружение внутри самой команды bash -lc:
+    # без LD_LIBRARY_PATH бинари не линкуются (libandroid-support.so).
+    args["command"] = _inject_termux_env(args.get("command"))
     return args
+
+
+def _inject_termux_env(cmd):
+    """Впрыскиваем export PREFIX/LD_LIBRARY_PATH/PATH/… в начало скрипта
+    bash/sh -lc/-c. Айдемпотентно: если переменные уже заданы, export просто
+    повторит те же значения."""
+    if not FILES_DIR or not isinstance(cmd, list) or len(cmd) != 3:
+        return cmd
+    shell, flag, script = cmd
+    if shell not in ("bash", "sh") or flag not in ("-lc", "-c"):
+        return cmd
+    if not isinstance(script, str) or "LD_LIBRARY_PATH=" in script[:400]:
+        return cmd
+    usr = os.path.join(FILES_DIR, "usr")
+    prefix = (
+        "export PREFIX='%(u)s' LD_LIBRARY_PATH='%(u)s/lib' "
+        "PATH='%(u)s/bin:%(u)s/bin/applets:/system/bin:/system/xbin' "
+        "HOME='%(h)s' TMPDIR='%(u)s/tmp' SHELL='%(u)s/bin/bash'; "
+        % {"u": usr, "h": os.path.join(FILES_DIR, "home")}
+    )
+    return [shell, flag, prefix + script]
 
 
 # модель путает закрывающий тег: </tool_result> ИЛИ </tool_call>

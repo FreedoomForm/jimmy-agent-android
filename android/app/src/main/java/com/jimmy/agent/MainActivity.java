@@ -67,7 +67,18 @@ public class MainActivity extends Activity {
             LINE = 0x1FFFFFFF, TXT = 0xFFECECEC, DIM = 0xFF9B9B9B, DIM2 = 0xFF6E6E6E,
             AMBER = 0xFFFFB020, USER_BG = 0xFF2F2F2F, GRUG = 0xFFB9A5FF,
             CODE_BG = 0xFF0D0D0D, CODE_TXT = 0xFFD8DEE4;
-    private static final String VERSION = "0.5.1";
+    // Версия берётся из manifest'а (versionName/versionCode), чтобы обновление
+    // ассетов срабатывало на КАЖДОМ новом APK без ручного бампа константы —
+    // ручной бамп уже один раз протёк (0.5.2/0.5.3 уехали со старым config.toml).
+    private String appVersion() {
+        try {
+            android.content.pm.PackageInfo pi =
+                    getPackageManager().getPackageInfo(getPackageName(), 0);
+            return pi.versionName + "/" + pi.versionCode;
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
     private static final int MAX_ATTEMPTS = 3;
     private static final long IDLE_TIMEOUT_MS = 120000; // сторожок «зависшего» ответа
 
@@ -305,9 +316,13 @@ public class MainActivity extends Activity {
                 br.close();
                 if (l != null) cur = l.trim();
             }
-            if (!VERSION.equals(cur)) {
+            // Технические файлы обновляем БЕЗУСЛОВНО при каждом запуске —
+            // копеечный IO, зато старый config.toml невозможен в принципе.
+            new File(home, ".codex").mkdirs();
+            copyAsset("jimmy/SYSTEM.md", new File(jimmyDir, "SYSTEM.md"));
+            copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
+            if (!appVersion().equals(cur)) {
                 jimmyDir.mkdirs();
-                new File(home, ".codex").mkdirs();
                 File agents = new File(jimmyDir, "AGENTS.md");
                 File shadow = new File(jimmyDir, ".AGENTS.md.default");
                 boolean userCustom = false;
@@ -320,10 +335,8 @@ public class MainActivity extends Activity {
                     copyAsset("jimmy/AGENTS.md", agents);
                     copyAsset("jimmy/AGENTS.md", shadow);
                 } // пользовательский промпт — святыня, не трогаем
-                copyAsset("jimmy/SYSTEM.md", new File(jimmyDir, "SYSTEM.md"));
-                copyAsset("jimmy/config.toml", new File(home, ".codex/config.toml"));
                 FileOutputStream fos = new FileOutputStream(marker);
-                fos.write((VERSION + "\n").getBytes("UTF-8"));
+                fos.write((appVersion() + "\n").getBytes("UTF-8"));
                 fos.close();
             }
         } catch (Throwable ignore) { }
