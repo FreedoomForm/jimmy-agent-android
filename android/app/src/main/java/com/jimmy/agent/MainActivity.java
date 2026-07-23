@@ -74,7 +74,8 @@ public class MainActivity extends Activity {
     // маркеры форматирования внутри потока ответа (не для пользователя)
     private static final String T_OPEN = "⟦T⟧", T_CLOSE = "⟦/T⟧";
     private static final String C_OPEN = "⟦C⟧", C_CLOSE = "⟦/C⟧";
-    private static final Pattern THINK_RX = Pattern.compile("(?is)<think>\\s*(.*?)(?:</think>|$)");
+    // ловим и «кривой» вариант <\think>, который иногда выдаёт 8B
+    private static final Pattern THINK_RX = Pattern.compile("(?is)<\\\\?think>\\s*(.*?)(?:</\\\\?think>|$)");
 
     private File filesDir, usr, home, jimmyDir, codexBin;
     private boolean hasSession = false;

@@ -11,7 +11,6 @@ Logs are written to proxy.log (full request/response details).
 """
 
 import json
-import html
 import os
 import time
 import uuid
@@ -288,18 +287,6 @@ def sanitize_tool_args(name, args):
         logfile(f"sanitize: sandbox_permissions '{sp}' удалён")
 
     cmd = args.get("command")
-    # 8B часто HTML-эскейпит текст после знакомства с <tool_call>-форматом:
-    # "mkdir -p x &amp;&amp; cd x", "&lt;h1&gt;" — возвращаем в норму.
-    if isinstance(cmd, str):
-        cmd = html.unescape(cmd)
-        args["command"] = cmd
-    elif isinstance(cmd, list):
-        args["command"] = cmd = [
-            html.unescape(c) if isinstance(c, str) else c for c in cmd
-        ]
-    if isinstance(args.get("workdir"), str):
-        args["workdir"] = html.unescape(args["workdir"])
-
     if isinstance(cmd, str):
         if _looks_like_command_line(cmd):
             args["command"] = ["bash", "-lc", cmd]
@@ -389,11 +376,7 @@ def parse_tool_calls(content, tools=None):
         if recovered is not None:
             logfile(f"recovered untagged tool call: {recovered[1]['function']['name']}")
             return recovered[0], [recovered[1]]
-        # вызов не распарсился даже с починкой — прячем обрывок <tool_call>…,
-        # чтобы не мусорить ни ответ пользователю, ни будущий контекст
-        cleaned = re.sub(r"<tool_call>.*?</tool_call>\s*", "", content, flags=re.DOTALL)
-        cleaned = re.sub(r"<tool_call>.*$", "", cleaned, flags=re.DOTALL).strip()
-        return cleaned, []
+        return content, []
 
     tool_calls = []
     schema_index = _tool_schema_index(tools)
