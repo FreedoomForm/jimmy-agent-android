@@ -152,6 +152,7 @@ public class MainActivity extends Activity {
             refreshAssetsIfNeeded();
             startProxy();
             showChat();
+            startSmokeOnce();
         } else {
             showLoading();
             new Thread(this::performSetup, "setup").start();
@@ -563,6 +564,34 @@ public class MainActivity extends Activity {
                 logconsole("proxy error: " + t);
             }
         }, "proxy").start();
+    }
+
+    // Одноразовый смок-тест окружения при старте: показываем пузырём,
+    // линкуется ли bash при запуске из Java с нашим env и цел ли
+    // libandroid-support.so. Без этого мы гадаем вслепую по скринам.
+    private void startSmokeOnce() {
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            try {
+                File bash = new File(usr, "bin/bash");
+                File lib = new File(usr, "lib/libandroid-support.so");
+                sb.append("🧪 smoke: bash=").append(bash.exists() ? bash.length() + "B" : "НЕТ")
+                  .append(", libandroid-support.so=").append(lib.exists() ? lib.length() + "B" : "НЕТ").append("\n");
+                String out = runAndWait(new String[]{ bash.getAbsolutePath(), "-c",
+                        "echo SMOKE_OK; echo LDP=<$LD_LIBRARY_PATH>; ls -1 $PREFIX/lib/libandroid* 2>&1 | head -3" },
+                        baseEnv(), null);
+                sb.append(out.trim());
+            } catch (Throwable t) {
+                sb.append("FAIL: ").append(String.valueOf(t));
+            }
+            final String res = sb.toString();
+            try {
+                FileOutputStream fos = new FileOutputStream(new File(filesDir, "smoke.txt"));
+                fos.write(res.getBytes("UTF-8"));
+                fos.close();
+            } catch (Throwable ignore) { }
+            runOnUiThread(() -> addNote(res));
+        }, "smoke").start();
     }
 
     // =====================================================================

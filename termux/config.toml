@@ -26,3 +26,7 @@ wire_api = "chat"
 # из-за чего Termux-бинари не линкуются (libandroid-support.so not found).
 [shell_environment_policy]
 inherit = "all"
+# Детерминированное дублирование окружения Termux в КАЖДЫЙ tool-процесс —
+# срабатывает независимо от inherit (шаг set применяется последним).
+# Пути фиксированные: пакет com.jimmy.agent → /data/data/com.jimmy.agent/files.
+set = { PREFIX = "/data/data/com.jimmy.agent/files/usr", HOME = "/data/data/com.jimmy.agent/files/home", TMPDIR = "/data/data/com.jimmy.agent/files/usr/tmp", SHELL = "/data/data/com.jimmy.agent/files/usr/bin/bash", LD_LIBRARY_PATH = "/data/data/com.jimmy.agent/files/usr/lib", PATH = "/data/data/com.jimmy.agent/files/usr/bin:/data/data/com.jimmy.agent/files/usr/bin/applets:/system/bin:/system/xbin", LANG = "C.UTF-8" }
