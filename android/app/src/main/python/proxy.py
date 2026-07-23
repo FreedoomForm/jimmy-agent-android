@@ -288,6 +288,12 @@ def sanitize_tool_args(name, args):
         logfile(f"sanitize: sandbox_permissions '{sp}' удалён")
 
     cmd = args.get("command")
+    # пустой argv ("command": []) — модель частый гость; заменяем на no-op,
+    # иначе codex роняет вызов с "command args are empty"
+    if isinstance(cmd, list) and len(cmd) == 0:
+        args["command"] = ["true"]
+        logfile("sanitize: empty argv → ['true']")
+        return args
     # 8B часто HTML-эскейпит текст после знакомства с <tool_call>-форматом:
     # "mkdir -p x &amp;&amp; cd x", "&lt;h1&gt;" — возвращаем в норму.
     if isinstance(cmd, str):
@@ -459,7 +465,8 @@ def parse_tool_calls(content, tools=None):
         # вызов не распарсился даже с починкой — прячем обрывок <tool_call>…,
         # чтобы не мусорить ни ответ пользователю, ни будущий контекст
         cleaned = re.sub(r"<tool_call>.*?</tool_call>\s*", "", content, flags=re.DOTALL)
-        cleaned = re.sub(r"<tool_call>.*$", "", cleaned, flags=re.DOTALL).strip()
+        cleaned = re.sub(r"<tool_call>.*$", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"</tool_call>\s*", "", cleaned).strip()
         return cleaned, []
 
     tool_calls = []
@@ -506,7 +513,8 @@ def parse_tool_calls(content, tools=None):
         except (json.JSONDecodeError, KeyError, AttributeError):
             continue
 
-    text = pattern.sub("", content).strip()
+    text = pattern.sub("", content)
+    text = re.sub(r"</tool_call>\s*", "", text).strip()
     return text, tool_calls
 
 
