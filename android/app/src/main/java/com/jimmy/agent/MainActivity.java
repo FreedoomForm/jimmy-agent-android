@@ -1077,6 +1077,10 @@ public class MainActivity extends Activity {
                 line = line.trim();
                 if (line.isEmpty()) continue;
                 if (!line.startsWith("{")) {
+                    // шум codex про 'uname' (os_info сыплет ERROR при определении
+                    // архитектуры) — безвреден, пользователю не интересен
+                    if (line.contains("os_info::") || line.contains("'uname' invocation error"))
+                        continue;
                     // не-JSON строки — обычно ошибки clap/рантайма: собираем в диагностику
                     if (rawLogged < 2 && diag.length() < 500) {
                         diag.append("codex: ").append(line.length() > 140 ? line.substring(0, 140) : line).append('\n');

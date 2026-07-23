@@ -303,6 +303,21 @@ def sanitize_tool_args(name, args):
         args["command"] = cmd = [
             html.unescape(c) if isinstance(c, str) else c for c in cmd
         ]
+    # пустые СТРОКИ — та же «command args are empty»: "", [""], [" ", ""] и
+    # argv с мусорными нестроковыми элементами. Чистим; если пусто — no-op.
+    if isinstance(cmd, str) and not cmd.strip():
+        args["command"] = ["true"]
+        logfile("sanitize: empty command string → ['true']")
+        return args
+    if isinstance(cmd, list):
+        cleaned_argv = [c for c in cmd if isinstance(c, str) and c.strip()]
+        if not cleaned_argv:
+            args["command"] = ["true"]
+            logfile("sanitize: argv из пустых строк → ['true']")
+            return args
+        if len(cleaned_argv) != len(cmd):
+            args["command"] = cmd = cleaned_argv
+            logfile(f"sanitize: argv почищен от пустых/нестроковых элементов ({len(cmd)} → {len(cleaned_argv)})")
     if isinstance(args.get("workdir"), str):
         args["workdir"] = html.unescape(args["workdir"])
 
@@ -391,6 +406,26 @@ def strip_fake_tool_results(text):
     if not isinstance(text, str) or "<tool_result>" not in text:
         return text
     return _FAKE_RESULT_RX.sub("", text).strip()
+
+
+# строки-имитации нашего терминального вывода: модель копирует «плёнку» чата
+# («command args are empty [exit -1]», «bash: line 1: python3: command not
+# found [exit 127]»), и этот мусор через историю самоподкрепляет её шизу.
+_FAKE_CMD_LINE_RX = re.compile(
+    r"^[ \t]*[^\n]{0,400}?(?:\[exit -?\d+\]|command args are empty)[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def strip_fake_cmd_output(text):
+    """Удаляем целые строки, имитирующие вывод терминала формата нашего чата."""
+    if not isinstance(text, str):
+        return text
+    if "[exit " not in text and "command args are empty" not in text:
+        return text
+    out = _FAKE_CMD_LINE_RX.sub("", text)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip("\n")
 
 
 def _extract_call_objects(obj):
@@ -486,6 +521,27 @@ def parse_tool_calls(content, tools=None):
                     or item.get("tool_name")
                     or (item.get("function") or {}).get("name")
                 )
+                if not name and len(item) == 1:
+                    # форма {"shell": {"command": [...]}} — ключ = имя инструмента
+                    only_key = next(iter(item))
+                    if only_key in schema_index:
+                        name = only_key
+                        item = {"arguments": item[only_key]}
+                if not name:
+                    # безымянный вызов {"command": [...]} — угадываем инструмент
+                    # по обязательным ключам схемы (shell ← command). Раньше такие
+                    # вызовы молча выбрасывались → codex завершал ход с «0 items».
+                    for tname, tschema in schema_index.items():
+                        treq = (
+                            tschema.get("required", [])
+                            if isinstance(tschema, dict)
+                            else []
+                        )
+                        if treq and all(k in item for k in treq):
+                            name = tname
+                            # весь объект и есть аргументы, а не {"arguments": ...}
+                            item = {"arguments": item}
+                            break
                 if not name:
                     continue
                 arguments = (
@@ -638,6 +694,17 @@ def _recover_embedded_call(content, tools):
             tried += 1
         i = content.find("{", i + 1)
     return None
+
+
+def _hide_toolcall_junk(text):
+    """Прячем теги/обрывки <tool_call>, когда вызовов не ожидается или парсинг
+    не состоялся — чтобы сырой XML не утекал пользователю и в историю."""
+    if not isinstance(text, str) or "tool_call" not in text:
+        return text
+    cleaned = re.sub(r"<tool_call>.*?</tool_call>\s*", "", text, flags=re.DOTALL)
+    cleaned = re.sub(r"<tool_call>.*$", "", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"</tool_call>\s*", "", cleaned)
+    return cleaned.strip()
 
 
 def extract_text_content(content):
@@ -794,9 +861,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             role = msg.get("role", "user")
             content = extract_text_content(msg.get("content"))
             if role != "tool":
-                # галлюцинированные моделью <tool_result> в прошлых ответах
-                # провоцируют её продолжать подделывать результаты — вырезаем
+                # галлюцинированные моделью <tool_result> и строки «...  [exit N]»
+                # в прошлых ответах провоцируют её продолжать подделывать
+                # результаты — вырезаем оба вида самоподкрепляющегося мусора
                 content = strip_fake_tool_results(content)
+                content = strip_fake_cmd_output(content)
 
             if role == "system":
                 system_prompt += content + "\n"
@@ -877,25 +946,57 @@ class ProxyHandler(BaseHTTPRequestHandler):
         logfile("--- TRANSLATED PAYLOAD ---")
         logfile(f"{json.dumps(jimmy_payload, indent=2)}")
 
-        # Forward to chatjimmy
+        # Forward to chatjimmy (вынесено в функцию — нужны ретраи пустых ответов)
+        ssl_ctx = ssl.create_default_context()
+        up_headers = {
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "Origin": "https://chatjimmy.ai",
+            "Referer": "https://chatjimmy.ai/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36",
+        }
+
+        def fetch_up(payload):
+            req = urllib.request.Request(
+                UPSTREAM_URL, data=json.dumps(payload).encode(), headers=up_headers
+            )
+            return (
+                urllib.request.urlopen(req, timeout=120, context=ssl_ctx)
+                .read()
+                .decode("utf-8")
+            )
+
+        def process_upstream(raw_resp):
+            """Возвращает (text_content, tool_calls_parsed, usage): чистый ответ
+            без stats/подделок, разобранные вызовы, статистику."""
+            c = re.sub(
+                r"<\|stats\|>.*?<\|/stats\|>", "", raw_resp, flags=re.DOTALL
+            ).strip()
+            # Поддельные <tool_result> и терминальные строки, которые модель
+            # нафантазировала (реальные придут ходом codex как role=tool).
+            c = strip_fake_tool_results(c)
+            c = strip_fake_cmd_output(c)
+            u = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            sm = re.search(r"<\|stats\|>(.*?)<\|/stats\|>", raw_resp, re.DOTALL)
+            if sm:
+                try:
+                    st = json.loads(sm.group(1))
+                    u["prompt_tokens"] = st.get("prefill_tokens", 0)
+                    u["completion_tokens"] = st.get("decode_tokens", 0)
+                    u["total_tokens"] = st.get("total_tokens", 0)
+                except json.JSONDecodeError:
+                    pass
+            if tools:
+                tc_text, tc_calls = parse_tool_calls(c, tools)
+            else:
+                tc_text, tc_calls = _hide_toolcall_junk(c), []
+            return tc_text, tc_calls, u
+
         upstream_start = time.time()
         try:
-            req = urllib.request.Request(
-                UPSTREAM_URL,
-                data=json.dumps(jimmy_payload).encode(),
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "*/*",
-                    "Origin": "https://chatjimmy.ai",
-                    "Referer": "https://chatjimmy.ai/",
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/145.0.0.0 Safari/537.36",
-                },
-            )
-            ctx = ssl.create_default_context()
-            resp = urllib.request.urlopen(req, timeout=120, context=ctx)
-            raw_response = resp.read().decode("utf-8")
+            raw_response = fetch_up(jimmy_payload)
             elapsed = time.time() - upstream_start
         except Exception as e:
             elapsed = time.time() - upstream_start
@@ -908,30 +1009,45 @@ class ProxyHandler(BaseHTTPRequestHandler):
         logfile("--- RAW UPSTREAM RESPONSE ---")
         logfile(raw_response)
 
-        # Strip stats, parse usage
-        content = re.sub(
-            r"<\|stats\|>.*?<\|/stats\|>", "", raw_response, flags=re.DOTALL
-        ).strip()
-        # Вырезаем поддельные <tool_result>, которые модель нафантазировала
-        # (реальные результаты придут следующим ходом от codex как role=tool).
-        content = strip_fake_tool_results(content)
-        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        stats_match = re.search(
-            r"<\|stats\|>(.*?)<\|/stats\|>", raw_response, re.DOTALL
-        )
-        if stats_match:
-            try:
-                stats = json.loads(stats_match.group(1))
-                usage["prompt_tokens"] = stats.get("prefill_tokens", 0)
-                usage["completion_tokens"] = stats.get("decode_tokens", 0)
-                usage["total_tokens"] = stats.get("total_tokens", 0)
-            except json.JSONDecodeError:
-                pass
-
         # ----- Detect tool calls in model output -----
-        text_content, tool_calls_parsed = (
-            parse_tool_calls(content, tools) if tools else (content, [])
-        )
+        text_content, tool_calls_parsed, usage = process_upstream(raw_response)
+
+        # Модель могла ответить «в никуда»: пустой текст без вызовов — весь
+        # её ответ съела чистка мусора (раньше codex завершал такой ход с
+        # «0 items, exit=0», и приложение показывало «не ответила за 3 попытки»).
+        # Даём upstream второй (и третий) шанс с явной подсказкой; если и тогда
+        # пусто — отвечаем честным плейсхолдером, чтобы ход не был нулевым.
+        if not tool_calls_parsed and not text_content.strip():
+            log("empty completion (all stripped) — retrying upstream with nudge")
+            for retry_no in range(2):
+                nudge_payload = dict(jimmy_payload)
+                nudge_payload["messages"] = list(chat_messages) + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Твой предыдущий ответ потерялся: в нём не было ни "
+                            "текста, ни корректного вызова инструмента. Ответь заново: "
+                            "либо обычным текстом по-русски, либо ОДНИМ вызовом shell "
+                            "в формате <tool_call>\n{\"name\": \"shell\", \"arguments\": "
+                            "{\"command\": [\"bash\", \"-lc\", \"команда\"]}}\n</tool_call>."
+                        ),
+                    }
+                ]
+                try:
+                    raw2 = fetch_up(nudge_payload)
+                except Exception as e:
+                    logfile(f"nudge retry {retry_no + 1} upstream error: {e}")
+                    break
+                text_content, tool_calls_parsed, usage = process_upstream(raw2)
+                if tool_calls_parsed or text_content.strip():
+                    logfile(f"nudge retry {retry_no + 1}: ответ восстановлен")
+                    break
+            if not tool_calls_parsed and not text_content.strip():
+                logfile("nudge retries exhausted — возвращаем плейсхолдер")
+                text_content = (
+                    "(модель дала пустой ответ несколько раз подряд — "
+                    "нажми ↻, чтобы попробовать ещё раз)"
+                )
 
         if tool_calls_parsed:
             finish_reason = "tool_calls"
@@ -944,8 +1060,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             reply_preview = f"[tool_calls: {', '.join(tc_names)}]"
         else:
             finish_reason = "stop"
-            message = {"role": "assistant", "content": content}
-            reply_preview = content[:100] + "..." if len(content) > 100 else content
+            # ВАЖНО: исходный content тут слать нельзя — в нём могли остаться
+            # битые <tool_call> и прочий мусор, который parse_tool_calls
+            # уже вычистил в text_content (именно так на экран пользователя
+            # утекали сырые теги).
+            message = {"role": "assistant", "content": text_content}
+            reply_preview = (
+                text_content[:100] + "..." if len(text_content) > 100 else text_content
+            )
 
         log(f'<- {elapsed:.2f}s {usage["total_tokens"]}tok | "{reply_preview}"')
 
@@ -1050,7 +1172,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"content": content},
+                                "delta": {"content": text_content},
                                 "finish_reason": None,
                             }
                         ],

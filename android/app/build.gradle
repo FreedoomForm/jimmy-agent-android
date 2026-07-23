@@ -14,8 +14,8 @@ android {
         // из приватной папки приложения (error=13 Permission denied).
         // Termux держит targetSdk 28 по той же причине — мы тоже.
         targetSdk 28
-        versionCode 16
-        versionName "0.5.6"
+        versionCode 17
+        versionName "0.5.7"
 
         python {
             version "3.12"
