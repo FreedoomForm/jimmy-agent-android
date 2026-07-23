@@ -349,7 +349,8 @@ def sanitize_tool_args(name, args):
     return args
 
 
-_FAKE_RESULT_RX = re.compile(r"<tool_result>.*?</tool_result>\s*", re.DOTALL)
+# модель путает закрывающий тег: </tool_result> ИЛИ </tool_call>
+_FAKE_RESULT_RX = re.compile(r"<tool_result>.*?</tool_(?:result|call)>\s*", re.DOTALL)
 
 
 def strip_fake_tool_results(text):
@@ -368,6 +369,46 @@ def _extract_call_objects(obj):
             return obj.get("tool_calls")
         return [obj]
     return []
+
+
+def _try_loads_lenient(raw):
+    """json.loads + починка типичного обрыва генерации: недостающие
+    закрывающие ]/} в конце строки дозакрываем (вне кавычек)."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    s = raw.rstrip()
+    stack = []
+    instr = False
+    esc = False
+    for ch in s:
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+        else:
+            if ch == '"':
+                instr = True
+            elif ch in "[{":
+                stack.append(ch)
+            elif ch in "]}":
+                if stack and (
+                    (stack[-1] == "[" and ch == "]") or (stack[-1] == "{" and ch == "}")
+                ):
+                    stack.pop()
+    if instr:
+        return None  # оборвано посреди строки — не чиним
+    closers = "".join("]" if c == "[" else "}" for c in reversed(stack))
+    if not closers:
+        return None
+    try:
+        return json.loads(s + closers)
+    except json.JSONDecodeError:
+        return None
 
 
 def parse_tool_calls(content, tools=None):
@@ -399,7 +440,10 @@ def parse_tool_calls(content, tools=None):
     schema_index = _tool_schema_index(tools)
     for raw in matches:
         try:
-            call = json.loads(raw.strip())
+            # модель часто обрывает JSON в конце — чиним недостающие ]/}
+            call = _try_loads_lenient(raw.strip())
+            if call is None:
+                raise json.JSONDecodeError("unrepairable", raw, 0)
             for item in _extract_call_objects(call):
                 if not isinstance(item, dict):
                     continue
